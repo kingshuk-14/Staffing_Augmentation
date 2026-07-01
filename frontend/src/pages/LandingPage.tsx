@@ -11,7 +11,7 @@ export function LandingPage() {
 
       <Boxes />
       
-      <div className="relative z-20 flex flex-col items-center justify-center text-center px-4">
+      <div className="relative z-20 flex flex-col items-center justify-center text-center px-4 pointer-events-none">
         <div className="mb-6 p-4 bg-red-100 rounded-full shadow-sm ring-1 ring-red-200">
           <img src="/alphaxine_logo.png" alt="Alphaxine Logo" className="w-16 h-16 object-contain" />
         </div>
@@ -24,7 +24,7 @@ export function LandingPage() {
           The next-generation staffing and recruitment platform. Connecting top talent with the best opportunities through intelligent automation.
         </p>
         
-        <div className="mt-10">
+        <div className="mt-10 pointer-events-auto">
           <Link 
             to="/login"
             className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white transition-all duration-200 bg-red-600 border border-transparent rounded-full shadow-lg hover:bg-red-700 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-600 group"
