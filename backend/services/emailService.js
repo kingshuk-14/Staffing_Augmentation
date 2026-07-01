@@ -167,8 +167,8 @@ async function sendClientProposal(clientEmail, subject, htmlContent, jobId, atta
   }
 }
 
-async function sendVerificationEmail(email, token) {
-  const backendUrl = process.env.BACKEND_URL || 'http://localhost:5000';
+async function sendVerificationEmail(email, token, originUrl = null) {
+  const backendUrl = originUrl || process.env.BACKEND_URL || 'http://localhost:5000';
   const yesUrl = `${backendUrl}/api/auth/verify-email-link?token=${token}&action=yes`;
   const noUrl = `${backendUrl}/api/auth/verify-email-link?token=${token}&action=no`;
   

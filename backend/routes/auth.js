@@ -24,7 +24,10 @@ router.post('/send-verification', async (req, res) => {
     );
 
     // Send the email
-    await sendVerificationEmail(email, token);
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const originUrl = `${protocol}://${host}`;
+    await sendVerificationEmail(email, token, originUrl);
     
     res.status(200).json({ message: 'Verification email sent successfully' });
   } catch (error) {
