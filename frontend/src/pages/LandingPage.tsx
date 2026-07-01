@@ -13,11 +13,11 @@ export function LandingPage() {
       
       <div className="relative z-20 flex flex-col items-center justify-center text-center px-4">
         <div className="mb-6 p-4 bg-red-100 rounded-full shadow-sm ring-1 ring-red-200">
-          <Building2 className="w-12 h-12 text-red-600" />
+          <img src="/alphaxine_logo.png" alt="Alphaxine Logo" className="w-16 h-16 object-contain" />
         </div>
         
         <h1 className={cn("md:text-6xl text-4xl font-extrabold text-slate-900 tracking-tight")}>
-          Welcome to <span className="text-red-600">Alphaxine</span>
+          Welcome to <span className="text-red-600">Alphaxine Staffing Portal</span>
         </h1>
         
         <p className="text-center mt-6 text-xl text-slate-700 max-w-2xl font-medium">
