@@ -37,7 +37,7 @@ export function CandidatesManager() {
   const fetchCandidates = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/candidates", {
+      const response = await fetch("/api/candidates", {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!response.ok) throw new Error("Failed to fetch candidates list");
@@ -59,7 +59,7 @@ export function CandidatesManager() {
     try {
       setError("");
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/candidates/${candId}/status`, {
+      const response = await fetch(`/api/candidates/${candId}/status`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -86,7 +86,7 @@ export function CandidatesManager() {
     try {
       setError("");
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/candidates/${candId}`, {
+      const response = await fetch(`/api/candidates/${candId}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`

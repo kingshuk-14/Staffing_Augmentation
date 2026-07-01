@@ -49,7 +49,7 @@ export function VendorSubmit() {
       if (phone) formData.append("phone", phone);
       if (expectedSalary) formData.append("expectedSalary", expectedSalary);
 
-      const response = await fetch("http://localhost:5000/api/vendors/submit-resume", {
+      const response = await fetch("/api/vendors/submit-resume", {
         method: "POST",
         body: formData
       });

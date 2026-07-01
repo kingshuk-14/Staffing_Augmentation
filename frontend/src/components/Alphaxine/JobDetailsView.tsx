@@ -139,7 +139,7 @@ export function JobDetailsView() {
       const token = localStorage.getItem("token");
 
       // Dispatch batch outsource API call
-      const res = await fetch(`http://localhost:5000/api/matches/${id}/outsource`, {
+      const res = await fetch(`/api/matches/${id}/outsource`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -173,7 +173,7 @@ export function JobDetailsView() {
   const fetchJobDetails = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/jobs/${id}`, {
+      const response = await fetch(`/api/jobs/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!response.ok) throw new Error("Failed to fetch job details");
@@ -190,7 +190,7 @@ export function JobDetailsView() {
   const fetchVendors = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/jobs/${id}/vendors`, {
+      const response = await fetch(`/api/jobs/${id}/vendors`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (response.ok) {
@@ -211,7 +211,7 @@ export function JobDetailsView() {
     setEvaluatingId(candidateId);
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/matches/${id}/${candidateId}/evaluate`, {
+      const response = await fetch(`/api/matches/${id}/${candidateId}/evaluate`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -233,7 +233,7 @@ export function JobDetailsView() {
     setUpdatingId(candidateId);
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/matches/${id}/${candidateId}/status`, {
+      const response = await fetch(`/api/matches/${id}/${candidateId}/status`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -263,7 +263,7 @@ export function JobDetailsView() {
     setOutreachResult(null);
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/vendors/outreach", {
+      const response = await fetch("/api/vendors/outreach", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -318,7 +318,7 @@ export function JobDetailsView() {
       const formData = new FormData();
       formData.append("resume", manualFile);
 
-      const response = await fetch(`http://localhost:5000/api/jobs/${id}/manual-candidate`, {
+      const response = await fetch(`/api/jobs/${id}/manual-candidate`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: formData,

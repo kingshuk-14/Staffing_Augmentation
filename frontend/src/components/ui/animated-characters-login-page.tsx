@@ -299,7 +299,7 @@ export function LoginPage() {
     try {
       if (!isOtpStep) {
         // Step 1: Request OTP
-        const response = await fetch("http://localhost:5000/api/auth/login-otp", {
+        const response = await fetch("/api/auth/login-otp", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password }),
@@ -314,7 +314,7 @@ export function LoginPage() {
         }
       } else {
         // Step 2: Verify OTP
-        const response = await fetch("http://localhost:5000/api/auth/login-verify", {
+        const response = await fetch("/api/auth/login-verify", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, otp }),

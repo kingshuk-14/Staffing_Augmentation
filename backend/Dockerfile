@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
 # Install Tesseract dependencies for OCR if needed
-RUN apk add --no-cache tesseract-ocr tesseract-ocr-eng
+RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-eng
 
 WORKDIR /usr/src/app
 

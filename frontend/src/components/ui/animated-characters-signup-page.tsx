@@ -170,7 +170,7 @@ export function SignupPage() {
     if (verificationSent && !isVerified) {
       intervalId = setInterval(async () => {
         try {
-          const response = await fetch(`http://localhost:5000/api/auth/verification-status?email=${encodeURIComponent(email)}`);
+          const response = await fetch(`/api/auth/verification-status?email=${encodeURIComponent(email)}`);
           if (response.ok) {
             const data = await response.json();
             if (data.status === 'verified') {
@@ -280,7 +280,7 @@ export function SignupPage() {
       // Step 1: Send verification email
       setIsLoading(true);
       try {
-        const response = await fetch("http://localhost:5000/api/auth/send-verification", {
+        const response = await fetch("/api/auth/send-verification", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email }),
@@ -309,7 +309,7 @@ export function SignupPage() {
     setIsLoading(true);
 
     try {
-      const response = await fetch("http://localhost:5000/api/auth/signup", {
+      const response = await fetch("/api/auth/signup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -331,7 +331,7 @@ export function SignupPage() {
 
       if (response.ok) {
         // Auto-login after signup
-        const loginResponse = await fetch("http://localhost:5000/api/auth/login", {
+        const loginResponse = await fetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password }),

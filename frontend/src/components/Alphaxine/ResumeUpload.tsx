@@ -110,7 +110,7 @@ export function ResumeUpload() {
     formData.append("resume", entry.file);
     const token = localStorage.getItem("token");
 
-    const response = await fetch("http://localhost:5000/api/resumes/upload", {
+    const response = await fetch("/api/resumes/upload", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
       body: formData,
@@ -178,7 +178,7 @@ export function ResumeUpload() {
     const interval = setInterval(async () => {
       try {
         const token = localStorage.getItem("token");
-        const response = await fetch(`http://localhost:5000/api/resumes/status?ids=${processingIds.join(",")}`, {
+        const response = await fetch(`/api/resumes/status?ids=${processingIds.join(",")}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (!response.ok) throw new Error("Failed to check status");

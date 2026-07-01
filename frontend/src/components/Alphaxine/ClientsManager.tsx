@@ -19,7 +19,7 @@ export function ClientsManager() {
   const fetchClients = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/clients", {
+      const response = await fetch("/api/clients", {
         headers: {
           Authorization: `Bearer ${token}`
         }
@@ -69,8 +69,8 @@ export function ClientsManager() {
     try {
       const token = localStorage.getItem("token");
       const url = editingClient
-        ? `http://localhost:5000/api/clients/${editingClient.id}`
-        : "http://localhost:5000/api/clients";
+        ? `/api/clients/${editingClient.id}`
+        : "/api/clients";
       const method = editingClient ? "PUT" : "POST";
 
       const response = await fetch(url, {
@@ -107,7 +107,7 @@ export function ClientsManager() {
     if (!window.confirm("Are you sure you want to delete this client? Job descriptions associated with this client will be unlinked.")) return;
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/clients/${id}`, {
+      const response = await fetch(`/api/clients/${id}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`

@@ -24,7 +24,7 @@ export function JobsDirectory() {
   const fetchClients = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/clients", {
+      const response = await fetch("/api/clients", {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (response.ok) {
@@ -39,7 +39,7 @@ export function JobsDirectory() {
   const fetchJobs = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/jobs", {
+      const response = await fetch("/api/jobs", {
         headers: {
           Authorization: `Bearer ${token}`
         }
@@ -63,7 +63,7 @@ export function JobsDirectory() {
 
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/jobs/${jobId}`, {
+      const response = await fetch(`/api/jobs/${jobId}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`
@@ -109,7 +109,7 @@ export function JobsDirectory() {
         formData.append("rawText", rawText);
       }
 
-      const response = await fetch("http://localhost:5000/api/jobs", {
+      const response = await fetch("/api/jobs", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`

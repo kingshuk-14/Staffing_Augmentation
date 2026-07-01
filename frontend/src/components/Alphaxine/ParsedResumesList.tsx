@@ -121,7 +121,7 @@ export function ParsedResumesList() {
   const fetchResumes = async () => {
       try {
         const token = localStorage.getItem("token");
-        const response = await fetch("http://localhost:5000/api/resumes", {
+        const response = await fetch("/api/resumes", {
           headers: {
             Authorization: `Bearer ${token}`
           }
@@ -151,7 +151,7 @@ export function ParsedResumesList() {
     if (!window.confirm("Are you sure you want to delete this resume? This will also remove the candidate profile and all associated matching records.")) return;
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/resumes/${resumeId}`, {
+      const response = await fetch(`/api/resumes/${resumeId}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`
@@ -170,7 +170,7 @@ export function ParsedResumesList() {
   const handleClearDuplicate = async (resumeId: number) => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/resumes/${resumeId}/clear-duplicate`, {
+      const response = await fetch(`/api/resumes/${resumeId}/clear-duplicate`, {
         method: "PATCH",
         headers: {
           Authorization: `Bearer ${token}`
@@ -195,7 +195,7 @@ export function ParsedResumesList() {
     setIsSummarizing(true);
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/resumes/${resumeId}/summarize`, {
+      const response = await fetch(`/api/resumes/${resumeId}/summarize`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

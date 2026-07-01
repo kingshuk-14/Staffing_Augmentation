@@ -19,7 +19,7 @@ export function VendorsManager() {
   const fetchVendors = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch("http://localhost:5000/api/vendors", {
+      const response = await fetch("/api/vendors", {
         headers: {
           Authorization: `Bearer ${token}`
         }
@@ -51,7 +51,7 @@ export function VendorsManager() {
         .map(s => s.trim())
         .filter(s => s.length > 0);
 
-      const response = await fetch("http://localhost:5000/api/vendors", {
+      const response = await fetch("/api/vendors", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -84,7 +84,7 @@ export function VendorsManager() {
     if (!window.confirm("Are you sure you want to delete this vendor? This will remove the vendor and all their submissions.")) return;
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`http://localhost:5000/api/vendors/${id}`, {
+      const response = await fetch(`/api/vendors/${id}`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`
