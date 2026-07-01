@@ -330,27 +330,14 @@ export function SignupPage() {
       const data = await response.json();
 
       if (response.ok) {
-        // Auto-login after signup
-        const loginResponse = await fetch("/api/auth/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-        });
-        const loginData = await loginResponse.json();
-
-        if (loginResponse.ok) {
-          localStorage.setItem("token", loginData.token);
-          localStorage.setItem("user", JSON.stringify(loginData.user));
-          localStorage.removeItem("signupData"); // clear saved state
-          if (role === 'recruiter') navigate('/recruiter');
-          else if (role === 'client') navigate('/client');
-          else if (role === 'alphaxine') navigate('/alphaxine');
-          else navigate('/recruiter');
-        } else {
-          navigate('/login');
-        }
+        // Since login now requires OTP, we redirect the user to the login page
+        localStorage.removeItem("signupData"); // clear saved state
+        
+        // Use a success state or just redirect
+        alert("Account created successfully! Please log in.");
+        navigate('/login');
       } else {
-        setError(data.error || "Failed to sign up.");
+        setError(data.error || "Signup failed");
         // If token failed, maybe reset verified status
         if (data.error && data.error.includes("token")) {
           setIsVerified(false);
