@@ -32,18 +32,39 @@ function ClientDashboard() {
   );
 }
 
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const token = localStorage.getItem("token");
+  if (!token) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
+function AuthRoute({ children }: { children: React.ReactNode }) {
+  const token = localStorage.getItem("token");
+  if (token) {
+    const userStr = localStorage.getItem("user");
+    const user = userStr ? JSON.parse(userStr) : null;
+    if (user?.role === 'recruiter') return <Navigate to="/recruiter" replace />;
+    if (user?.role === 'client') return <Navigate to="/client" replace />;
+    return <Navigate to="/alphaxine" replace />;
+  }
+  return <>{children}</>;
+}
+
 function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<LandingPage />} />
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/signup" element={<SignupPage />} />
-        <Route path="/recruiter" element={<RecruiterDashboard />} />
-        <Route path="/client" element={<ClientDashboard />} />
-        <Route path="/vendor-submit" element={<VendorSubmit />} />
+        <Route path="/login" element={<AuthRoute><LoginPage /></AuthRoute>} />
+        <Route path="/signup" element={<AuthRoute><SignupPage /></AuthRoute>} />
         
-        <Route path="/alphaxine" element={<SidebarLayout />}>
+        <Route path="/recruiter" element={<ProtectedRoute><RecruiterDashboard /></ProtectedRoute>} />
+        <Route path="/client" element={<ProtectedRoute><ClientDashboard /></ProtectedRoute>} />
+        <Route path="/vendor-submit" element={<ProtectedRoute><VendorSubmit /></ProtectedRoute>} />
+        
+        <Route path="/alphaxine" element={<ProtectedRoute><SidebarLayout /></ProtectedRoute>}>
           <Route index element={<DashboardOverview />} />
           <Route path="upload" element={<ResumeUpload />} />
           <Route path="resumes" element={<ParsedResumesList />} />

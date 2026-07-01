@@ -79,7 +79,7 @@ export function SidebarLayout() {
             </span>
           </Link>
           <Link
-            to="/login"
+            to="/"
             onClick={() => {
               localStorage.removeItem("token");
               localStorage.removeItem("user");
