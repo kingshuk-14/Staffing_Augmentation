@@ -10,7 +10,7 @@ services:
       MYSQL_DATABASE: staffing_db
       MYSQL_USER: ${DB_USER:-root}
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       # Mount schema.sql to automatically initialize empty database
