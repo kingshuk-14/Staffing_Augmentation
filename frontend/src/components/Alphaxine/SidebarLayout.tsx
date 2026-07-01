@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { Home, Upload, FileText, LogOut, Briefcase, Users, UserCheck, Building2, Loader2 } from "lucide-react";
+import { Home, Upload, FileText, LogOut, Briefcase, Users, UserCheck, Building2, Loader2, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function SidebarLayout() {
@@ -63,7 +63,21 @@ export function SidebarLayout() {
           })}
         </nav>
 
-        <div className="p-3.5 border-t border-white/15 overflow-hidden">
+        <div className="p-3.5 border-t border-white/15 overflow-hidden flex flex-col space-y-1">
+          <Link
+            to="/alphaxine/profile"
+            className={cn(
+              "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 overflow-hidden",
+              location.pathname === "/alphaxine/profile"
+                ? "bg-white/20 text-white shadow-sm backdrop-blur-sm"
+                : "text-white/70 hover:bg-white/10 hover:text-white"
+            )}
+          >
+            <Settings className={cn("size-5 shrink-0", location.pathname === "/alphaxine/profile" ? "text-white" : "text-white/60")} />
+            <span className="opacity-0 group-hover/sidebar:opacity-100 transition-opacity duration-300 ease-in-out truncate font-semibold">
+              Profile Settings
+            </span>
+          </Link>
           <Link
             to="/login"
             onClick={() => {

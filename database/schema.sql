@@ -189,3 +189,11 @@ CREATE TABLE IF NOT EXISTS login_otps (
   expires_at TIMESTAMP NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 16. Table structure for table `password_reset_otps`
+CREATE TABLE IF NOT EXISTS password_reset_otps (
+  email VARCHAR(255) PRIMARY KEY,
+  otp VARCHAR(6) NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

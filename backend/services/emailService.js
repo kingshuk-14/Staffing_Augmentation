@@ -309,9 +309,78 @@ async function sendLoginOtpEmail(email, otp) {
   }
 }
 
+async function sendPasswordResetOTP(toEmail, otp) {
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        .header { background-color: #ef4444; color: #fff; padding: 15px; text-align: center; border-radius: 6px 6px 0 0; }
+        .content { padding: 20px; text-align: center; }
+        .otp-box { display: inline-block; padding: 15px 30px; font-size: 24px; font-weight: bold; background-color: #f3f4f6; border: 2px dashed #ef4444; color: #ef4444; letter-spacing: 5px; margin: 20px 0; border-radius: 8px; }
+        .footer { font-size: 12px; color: #777; margin-top: 20px; text-align: center; border-top: 1px solid #eee; padding-top: 10px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h2>Password Reset Request</h2>
+        </div>
+        <div class="content">
+          <p>We received a request to change your password for your Alphaxine account.</p>
+          <p>Please use the following One-Time Password (OTP) to securely change your password. This OTP is valid for 15 minutes.</p>
+          <div class="otp-box">${otp}</div>
+          <p>If you did not request a password change, please ignore this email or contact support.</p>
+        </div>
+        <div class="footer">
+          Alphaxine Security System
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const mailOptions = {
+    from: process.env.SMTP_FROM || '"Alphaxine Security" <security@alphaxine.com>',
+    to: toEmail,
+    subject: 'Alphaxine - Password Reset OTP',
+    html: htmlContent
+  };
+
+  if (transporter) {
+    try {
+      const info = await transporter.sendMail(mailOptions);
+      console.log(`Password reset OTP sent to ${toEmail}: ${info.messageId}`);
+      return { success: true, messageId: info.messageId };
+    } catch (error) {
+      console.error('Error sending password reset OTP:', error.message);
+      throw error;
+    }
+  }
+
+  // Fallback to local mock file if SMTP not configured
+  try {
+    const sentEmailsDir = path.join(__dirname, '..', 'sent_emails');
+    if (!fs.existsSync(sentEmailsDir)) {
+      fs.mkdirSync(sentEmailsDir, { recursive: true });
+    }
+    const fileName = `password_reset_${Date.now()}.html`;
+    const filePath = path.join(sentEmailsDir, fileName);
+    fs.writeFileSync(filePath, htmlContent, 'utf-8');
+    console.log(`Password reset OTP email mock written locally: ${filePath}`);
+    return { success: true, filePath };
+  } catch (error) {
+    console.error('Error writing password reset OTP email locally:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   sendJobOutreach,
   sendClientProposal,
   sendVerificationEmail,
-  sendLoginOtpEmail
+  sendLoginOtpEmail,
+  sendPasswordResetOTP
 };
