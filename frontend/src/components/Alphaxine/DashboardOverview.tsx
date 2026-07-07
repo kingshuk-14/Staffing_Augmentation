@@ -33,6 +33,65 @@ export function DashboardOverview() {
     fetchStats();
   }, []);
 
+  const handleGenerateReport = async () => {
+    try {
+      const token = localStorage.getItem("token");
+      const response = await fetch("/api/dashboard/report", {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (!response.ok) throw new Error("Failed to fetch report data");
+      const reportData = await response.json();
+
+      // Define columns
+      const headers = [
+        "Number of Openings",
+        "Client",
+        "JD",
+        "Position",
+        "Experience",
+        "Number of Candidates Outsourced",
+        "Number of Candidates Hired",
+        "Number of Candidates Rejected"
+      ];
+
+      // Convert rows to CSV format
+      const csvRows = [];
+      csvRows.push(headers.map(h => `"${h.replace(/"/g, '""')}"`).join(","));
+
+      for (const row of reportData) {
+        const values = [
+          row.openings || 0,
+          row.client || "N/A",
+          row.jd || "",
+          row.position || "N/A",
+          row.experience ? `${row.experience} years` : "Open",
+          row.outsourced || 0,
+          row.hired || 0,
+          row.rejected || 0
+        ];
+        csvRows.push(values.map(v => {
+          const str = String(v).replace(/"/g, '""');
+          return `"${str}"`;
+        }).join(","));
+      }
+
+      const csvContent = "\uFEFF" + csvRows.join("\n"); // Add BOM for Excel UTF-8 support
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      link.setAttribute("download", `Recruitment_Report_${new Date().toISOString().split('T')[0]}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || "Failed to generate report.");
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center p-20 text-slate-400 gap-3 bg-white rounded-2xl border border-slate-150 shadow-sm max-w-6xl mx-auto mt-8">
@@ -61,9 +120,18 @@ export function DashboardOverview() {
           <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">Alphaxine Dashboard</h1>
           <p className="text-slate-500 mt-1 text-sm">Real-time candidate metrics, client fulfillment pipeline, and recruiter activities overview.</p>
         </div>
-        <div className="flex items-center gap-2 text-slate-400 text-xs font-semibold uppercase tracking-wider bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-          <Clock className="size-3.5" />
-          <span>Live updates</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleGenerateReport}
+            className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-[#10b981] to-[#0d9488] text-white text-xs font-bold rounded-xl shadow-md hover:shadow-emerald-600/10 active:scale-95 transition cursor-pointer"
+          >
+            <FileText className="size-3.5" />
+            Generate Report
+          </button>
+          <div className="flex items-center gap-2 text-slate-400 text-xs font-semibold uppercase tracking-wider bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
+            <Clock className="size-3.5" />
+            <span>Live updates</span>
+          </div>
         </div>
       </div>
 

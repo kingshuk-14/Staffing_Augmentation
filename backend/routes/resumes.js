@@ -9,7 +9,9 @@ const pool = require('../db');
 const authenticateToken = require('../middleware/authMiddleware');
 const Groq = require('groq-sdk');
 const { cleanText } = require('../services/parserHelper');
-
+const aiService = require('../services/aiService');
+const prompts = require('../services/prompts');
+const knowledgeService = require('../services/knowledgeService');
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const router = express.Router();
@@ -206,54 +208,26 @@ async function processResumeInBackground(resumeId, originalname, pool) {
       throw new Error("Extracted text is empty or resume record not found");
     }
 
-    const systemPrompt = `You are a technical recruiter. Parse the provided resume text and extract candidate profile details and summaries into a single JSON object with these exact keys:
-    1. name: The candidate's name (string).
-    2. email: Candidate's email address (string).
-    3. phone: Phone number (string).
-    4. expected_salary: Expected annual salary in INR (numeric/null).
-    5. current_location: Current location (string).
-    6. total_experience_years: The total professional experience of the candidate (string, e.g. '5.5', '5+', '10+'). If the resume explicitly mentions something like '5+ years' or '10+ years', return it EXACTLY as '5+' or '10+'. Otherwise, calculate the total years precisely from the listed experiences (e.g. '6.2').
-    7. skills: Array of candidate's key skills (strings).
-    8. experiences: Array of objects, each containing:
-       - company: Company name (string)
-       - role: Job title (string)
-       - duration_months: Duration worked in months (integer)
-       - description: Key accomplishments (string)
-    9. professional_summary: A concise 2-3 sentence overview of the candidate's profile, expertise area, and career level.
-    10. key_strengths: Array of 3-5 bullet-point strings describing the candidate's top strengths.
-    11. career_trajectory: A 1-2 sentence description of the candidate's career progression.
-    12. education_highlight: A single string summarizing the candidate's highest/most relevant education.
-    
-    Output ONLY valid JSON.
-    
-    UN-SCRAMBLE INSTRUCTIONS: The resume text is extracted from a PDF which may have a two-column layout. When columns are extracted, text lines across the columns often interlace (e.g. contact details or skills from the left sidebar appear in the middle of work experience bullet points). You MUST mentally un-scramble the columns, separate the sidebar data (contact info, skills, education) from the main experience timeline, and associate work accomplishments with their correct employer/job role.
-    
-    CRITICAL DATE & DURATION CALCULATIONS (Today is June 29, 2026):
-    - Extract ALL experiences. Do not skip any role or project.
-    - If a role lists dates, calculate the exact duration in months. If the end date is "Present" or "Current", calculate the duration up to June 2026.
-    - If the resume states a total years of experience in their profile/summary (e.g. "5+ years of SAP FICO experience"), but individual projects or roles do not have explicit dates, distribute this total duration (e.g. 5 years = 60 months) across the projects/roles, or attribute it to the main current/most recent employer, so that the candidate's total experience in the database matches their actual experience level. Do NOT default duration_months to 0 if total experience is specified!`;
+    const systemPrompt = prompts.resumeBackgroundParsing.getSystemPrompt();
 
     const cleanedText = cleanText(resume.extracted_text).substring(0, 30000);
-    let chatCompletion = null;
+    let parsedData = null;
     let attempts = 0;
     const maxAttempts = 3;
     let retryDelay = 5000;
 
+    const userPrompt = prompts.resumeBackgroundParsing.getUserPrompt(cleanedText);
+    const rationalizeTask = prompts.resumeBackgroundParsing.getRationalizeTask();
+
     while (attempts < maxAttempts) {
       try {
-        chatCompletion = await groq.chat.completions.create({
-          messages: [
-            { role: 'system', content: 'You are an AI parsing API. Return only valid JSON.' },
-            { role: 'user', content: systemPrompt + '\n\nResume Extract:\n' + cleanedText }
-          ],
-          model: 'llama-3.1-8b-instant',
-          temperature: 0.1,
-          response_format: { type: 'json_object' }
-        });
+        const consensusResult = await aiService.executeConsensus(systemPrompt, userPrompt, rationalizeTask);
+        parsedData = consensusResult.finalJson;
+        if (!parsedData) throw new Error("AI returned null");
         break;
       } catch (parseErr) {
         attempts++;
-        console.warn(`Groq parsing attempt ${attempts} failed:`, parseErr.message || parseErr);
+        console.warn(`Multi-LLM parsing attempt ${attempts} failed:`, parseErr.message || parseErr);
         if (attempts >= maxAttempts) {
           throw new Error(`Failed to parse candidate details via AI: ${parseErr.message || parseErr}`);
         }
@@ -262,33 +236,33 @@ async function processResumeInBackground(resumeId, originalname, pool) {
       }
     }
 
-    const parsedData = JSON.parse(chatCompletion.choices[0].message.content);
+    const name = parsedData.name && parsedData.name !== 'Not Found' ? parsedData.name : originalname.split('.')[0];
+    const email = parsedData.email && parsedData.email !== 'Not Found' ? parsedData.email : `candidate_${resumeId}@test.com`;
+    const phone = parsedData.phone && parsedData.phone !== 'Not Found' ? parsedData.phone : '';
+    const expectedSalary = parsedData.expected_ctc && parsedData.expected_ctc !== 'Not Found' ? parsedData.expected_ctc : null;
+    const currentLocation = parsedData.location && parsedData.location !== 'Not Found' ? parsedData.location : '';
+    const totalExpYears = parsedData.total_experience && parsedData.total_experience !== 'Not Found' ? String(parsedData.total_experience) : '0';
+    
+    const skills = [
+      ...(Array.isArray(parsedData.sap_modules) ? parsedData.sap_modules : []),
+      ...(Array.isArray(parsedData.technical_skills) ? parsedData.technical_skills : []),
+      ...(Array.isArray(parsedData.functional_skills) ? parsedData.functional_skills : []),
+      ...(Array.isArray(parsedData.tools_and_technologies) ? parsedData.tools_and_technologies : [])
+    ].filter(s => s && s !== 'Not Found');
 
-    const name = parsedData.name || originalname.split('.')[0];
-    const email = parsedData.email || `candidate_${resumeId}@test.com`;
-    const phone = parsedData.phone || '';
-    const expectedSalary = parsedData.expected_salary || null;
-    const currentLocation = parsedData.current_location || '';
-    const totalExpYears = parsedData.total_experience_years ? String(parsedData.total_experience_years) : '0';
-    const skills = parsedData.skills || [];
-    const experiences = parsedData.experiences || [];
+    const experiences = Array.isArray(parsedData.projects) ? parsedData.projects.map(p => ({
+      company: p.client && p.client !== 'Not Found' ? p.client : '',
+      role: p.role && p.role !== 'Not Found' ? p.role : '',
+      duration_months: 0, 
+      description: Array.isArray(p.responsibilities) ? p.responsibilities.join('\n') : (p.responsibilities || '')
+    })) : [];
 
-    // Construct summary structure expected by downstream modules
-    const summaryData = {
-      professional_summary: parsedData.professional_summary || '',
-      key_strengths: parsedData.key_strengths || [],
-      career_trajectory: parsedData.career_trajectory || '',
-      education_highlight: parsedData.education_highlight || '',
-      experience: experiences.map(exp => ({
-        company: exp.company || '',
-        title: exp.role || '',
-        accomplishments: exp.description || ''
-      })),
-      'skill set': skills
-    };
-    const professionalSummary = summaryData.professional_summary;
+    const summaryData = parsedData;
+    const professionalSummary = Array.isArray(parsedData.summary) ? parsedData.summary.join(' ') : (parsedData.summary || '');
 
-    await pool.query('UPDATE resumes SET summarised = ? WHERE id = ?', [JSON.stringify(summaryData), resumeId]);
+    const knowledgeSet = knowledgeService.generateKnowledgeSet(parsedData);
+
+    await pool.query('UPDATE resumes SET summarised = ?, knowledge_set = ? WHERE id = ?', [JSON.stringify(summaryData), JSON.stringify(knowledgeSet), resumeId]);
 
     // 3. Run duplicate detection BEFORE candidate upsert
     const dupResult = await detectDuplicate(
@@ -304,67 +278,58 @@ async function processResumeInBackground(resumeId, originalname, pool) {
          WHERE id = ?`,
         [dupResult.duplicateOf, dupResult.score, dupResult.reason, resumeId]
       );
+    }
 
-      // If duplicate, retrieve existing candidate ID associated with original resume
-      const [candRows] = await pool.query('SELECT id FROM candidates WHERE resume_id = ?', [dupResult.duplicateOf]);
-      if (candRows.length > 0) {
-        candidateId = candRows[0].id;
-      } else {
-        const [candEmailRows] = await pool.query('SELECT id FROM candidates WHERE email = ?', [email]);
-        if (candEmailRows.length > 0) {
-          candidateId = candEmailRows[0].id;
-        }
-      }
+    // 4. Insert or Update candidate (ALWAYS run this even for duplicates)
+    const [existingCand] = await pool.query('SELECT id, resume_id FROM candidates WHERE email = ?', [email]);
+
+    if (existingCand.length > 0) {
+      candidateId = existingCand[0].id;
+      await pool.query(
+        `UPDATE candidates
+         SET resume_id = ?, name = ?, phone = ?, expected_salary = ?, current_location = ?, total_experience_years = ?
+         WHERE id = ?`,
+        [resumeId, name, phone, expectedSalary, currentLocation, totalExpYears, candidateId]
+      );
+      await pool.query('DELETE FROM candidate_skills WHERE candidate_id = ?', [candidateId]);
+      await pool.query('DELETE FROM candidate_experiences WHERE candidate_id = ?', [candidateId]);
     } else {
-      // 4. Insert or Update candidate (ONLY if unique resume)
-      const [existingCand] = await pool.query('SELECT id, resume_id FROM candidates WHERE email = ?', [email]);
+      const [candResult] = await pool.query(
+        `INSERT INTO candidates (resume_id, name, email, phone, expected_salary, current_location, total_experience_years)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [resumeId, name, email, phone, expectedSalary, currentLocation, totalExpYears]
+      );
+      candidateId = candResult.insertId;
+    }
 
-      if (existingCand.length > 0) {
-        candidateId = existingCand[0].id;
-        await pool.query(
-          `UPDATE candidates
-           SET resume_id = ?, name = ?, phone = ?, expected_salary = ?, current_location = ?, total_experience_years = ?
-           WHERE id = ?`,
-          [resumeId, name, phone, expectedSalary, currentLocation, totalExpYears, candidateId]
-        );
-        await pool.query('DELETE FROM candidate_skills WHERE candidate_id = ?', [candidateId]);
-        await pool.query('DELETE FROM candidate_experiences WHERE candidate_id = ?', [candidateId]);
-      } else {
-        const [candResult] = await pool.query(
-          `INSERT INTO candidates (resume_id, name, email, phone, expected_salary, current_location, total_experience_years)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [resumeId, name, email, phone, expectedSalary, currentLocation, totalExpYears]
-        );
-        candidateId = candResult.insertId;
-      }
+    // 5. Save normalized skills via bulk insert
+    const skillValues = skills
+      .filter(s => s && s.trim())
+      .map(s => [candidateId, s.trim()]);
+    if (skillValues.length > 0) {
+      await pool.query(
+        'INSERT IGNORE INTO candidate_skills (candidate_id, skill) VALUES ?',
+        [skillValues]
+      );
+    }
 
-      // 5. Save normalized skills via bulk insert
-      const skillValues = skills
-        .filter(s => s && s.trim())
-        .map(s => [candidateId, s.trim()]);
-      if (skillValues.length > 0) {
-        await pool.query(
-          'INSERT IGNORE INTO candidate_skills (candidate_id, skill) VALUES ?',
-          [skillValues]
-        );
-      }
+    // 6. Save normalized experiences via bulk insert
+    const expValues = experiences.map(exp => [
+      candidateId,
+      exp.company || '',
+      exp.role || '',
+      exp.duration_months || 0,
+      exp.description || ''
+    ]);
+    if (expValues.length > 0) {
+      await pool.query(
+        'INSERT INTO candidate_experiences (candidate_id, company, role, duration_months, description) VALUES ?',
+        [expValues]
+      );
+    }
 
-      // 6. Save normalized experiences via bulk insert
-      const expValues = experiences.map(exp => [
-        candidateId,
-        exp.company || '',
-        exp.role || '',
-        exp.duration_months || 0,
-        exp.description || ''
-      ]);
-      if (expValues.length > 0) {
-        await pool.query(
-          'INSERT INTO candidate_experiences (candidate_id, company, role, duration_months, description) VALUES ?',
-          [expValues]
-        );
-      }
-
-      // Mark status as 'COMPLETED'
+    // Update processing status
+    if (!dupResult || !dupResult.isDuplicate) {
       await pool.query("UPDATE resumes SET processing_status = 'COMPLETED' WHERE id = ?", [resumeId]);
     }
   } catch (error) {
@@ -526,24 +491,14 @@ router.post('/:id/summarize', authenticateToken, async (req, res) => {
     
     UN-SCRAMBLE INSTRUCTIONS: The resume text is extracted from a PDF which may have a two-column layout. When columns are extracted, text lines across the columns often interlace (e.g. contact details or skills from the left sidebar appear in the middle of work experience bullet points). You MUST mentally un-scramble the columns, separate the sidebar data (contact info, skills, education) from the main experience timeline, and associate work accomplishments with their correct employer/job role.`;
 
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt
-        },
-        {
-          role: "user",
-          content: cleanedText
-        }
-      ],
-      model: "llama-3.1-8b-instant",
-      temperature: 0.1,
-      response_format: { type: "json_object" }
-    });
+    const userPrompt = 'Resume Extract:\n' + cleanedText;
+    const rationalizeTask = `Review the model extractions. Output a single JSON object containing only the requested fields: ${requestedFields.join(', ')}.`;
 
-    const aiResponse = chatCompletion.choices[0].message.content;
-    const summaryData = JSON.parse(aiResponse);
+    const consensusResult = await aiService.executeConsensus(systemPrompt, userPrompt, rationalizeTask);
+    const summaryData = consensusResult.finalJson;
+    if (!summaryData) {
+      return res.status(500).json({ error: 'Failed to generate summary' });
+    }
 
     // Save directly to the new summarised column
     await pool.query('UPDATE resumes SET summarised = ? WHERE id = ?', [JSON.stringify(summaryData), resumeId]);
@@ -624,6 +579,34 @@ router.patch('/:id/clear-duplicate', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error clearing duplicate flag:', error);
     res.status(500).json({ error: 'Failed to clear duplicate flag' });
+  }
+});
+
+// POST /api/resumes/:id/reparse — manually trigger reprocessing
+router.post('/:id/reparse', authenticateToken, async (req, res) => {
+  const resumeId = req.params.id;
+  try {
+    const [rows] = await pool.query('SELECT id, file_name, uploaded_by FROM resumes WHERE id = ?', [resumeId]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Resume not found' });
+
+    const resume = rows[0];
+    if (req.user.role !== 'alphaxine' && req.user.userId !== resume.uploaded_by) {
+      return res.status(403).json({ error: 'Not authorized to reparse this resume' });
+    }
+
+    // Reset status to INGESTED and clear any prior errors
+    await pool.query(
+      "UPDATE resumes SET processing_status = 'INGESTED', error_message = NULL WHERE id = ?",
+      [resumeId]
+    );
+
+    // Queue for processing
+    queueResumeForParsing(resumeId, resume.file_name);
+
+    res.status(200).json({ success: true, message: 'Reparsing started in the background.' });
+  } catch (error) {
+    console.error('Error triggering reparse:', error);
+    res.status(500).json({ error: 'Failed to trigger resume reparsing' });
   }
 });
 

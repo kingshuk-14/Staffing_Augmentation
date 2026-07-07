@@ -12,6 +12,7 @@ import { CandidatesManager } from "@/components/Alphaxine/CandidatesManager";
 import { ClientsManager } from "@/components/Alphaxine/ClientsManager";
 import { DashboardOverview } from "@/components/Alphaxine/DashboardOverview";
 import { ProfileSettings } from "@/components/Alphaxine/ProfileSettings";
+import MailIntegration from "@/components/Alphaxine/MailIntegration";
 import { VendorSubmit } from "@/components/VendorPortal/VendorSubmit";
 
 function RecruiterDashboard() {
@@ -73,6 +74,7 @@ function App() {
           <Route path="vendors" element={<VendorsManager />} />
           <Route path="candidates" element={<CandidatesManager />} />
           <Route path="clients" element={<ClientsManager />} />
+          <Route path="mail-integration" element={<MailIntegration />} />
           <Route path="profile" element={<ProfileSettings />} />
         </Route>
         

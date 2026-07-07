@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Briefcase, Plus, Calendar, IndianRupee, Users, AlertCircle, FileText, Upload, Sparkles, Loader2, Trash2 } from "lucide-react";
+import { Briefcase, Plus, Calendar, IndianRupee, Users, AlertCircle, FileText, Upload, Sparkles, Loader2, Trash2, MessageSquare, Send, X, ChevronRight, HelpCircle } from "lucide-react";
 
 export function JobsDirectory() {
   const [jobs, setJobs] = useState<any[]>([]);
@@ -17,7 +17,6 @@ export function JobsDirectory() {
   const [file, setFile] = useState<File | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
 
-  // Clients state
   const [clients, setClients] = useState<any[]>([]);
   const [selectedClientId, setSelectedClientId] = useState("");
 
@@ -141,9 +140,16 @@ export function JobsDirectory() {
     }
   };
 
+  const getPseudoMetadata = (job: any) => {
+    if (!job.pseudo_jd_metadata) return null;
+    if (typeof job.pseudo_jd_metadata === 'string') {
+      try { return JSON.parse(job.pseudo_jd_metadata); } catch(e) { return null; }
+    }
+    return job.pseudo_jd_metadata;
+  };
+
   return (
     <div className="max-w-6xl mx-auto space-y-8">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-slate-200/80 pb-6 gap-4">
         <div>
           <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">
@@ -153,13 +159,15 @@ export function JobsDirectory() {
             Manage client job descriptions, extract skill requirements via AI, and audit candidate pools in real-time.
           </p>
         </div>
-        <button
-          onClick={() => setShowAddForm(!showAddForm)}
-          className="flex items-center justify-center gap-2 px-5 py-2.5 bg-gradient-to-r from-[#F55036] to-[#c9381f] text-white rounded-xl hover:shadow-lg hover:shadow-orange-600/20 active:scale-95 transition-all duration-200 font-bold text-sm shrink-0"
-        >
-          <Plus className="size-4" />
-          Add Job Description
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowAddForm(!showAddForm)}
+            className="flex items-center justify-center gap-2 px-5 py-2.5 bg-gradient-to-r from-[#F55036] to-[#c9381f] text-white rounded-xl hover:shadow-lg hover:shadow-orange-600/20 active:scale-95 transition-all duration-200 font-bold text-sm shrink-0 shadow-sm"
+          >
+            <Plus className="size-4" />
+            Add Job Description
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -332,14 +340,22 @@ export function JobsDirectory() {
               className="group bg-white p-6 rounded-2xl border border-slate-200/90 hover:border-[#F55036] hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 shadow-sm flex flex-col justify-between"
             >
               <div>
-                <div className="flex items-center justify-between mb-4">
-                  <span className={`text-[10px] font-extrabold tracking-wider uppercase px-2.5 py-1 rounded-lg border ${
-                    job.status === "OPEN" ? "bg-green-50 text-green-700 border-green-200/60" :
-                    job.status === "PAUSED" ? "bg-amber-50 text-amber-700 border-amber-200/60" :
-                    "bg-slate-50 text-slate-500 border-slate-200/60"
-                  }`}>
-                    {job.status}
-                  </span>
+                <div className="flex items-center justify-between mb-4 gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-[10px] font-extrabold tracking-wider uppercase px-2.5 py-1 rounded-lg border ${
+                      job.status === "OPEN" ? "bg-green-50 text-green-700 border-green-200/60" :
+                      job.status === "PAUSED" ? "bg-amber-50 text-amber-700 border-amber-200/60" :
+                      "bg-slate-50 text-slate-500 border-slate-200/60"
+                    }`}>
+                      {job.status}
+                    </span>
+                    {job.is_pseudo ? (
+                      <span className="text-[10px] font-extrabold tracking-wider uppercase px-2.5 py-1 rounded-lg border bg-purple-50 text-purple-700 border-purple-200/60 flex items-center gap-1">
+                        <Sparkles className="size-3 text-purple-600" />
+                        Pseudo JD ({getPseudoMetadata(job)?.confidenceScore ? `${getPseudoMetadata(job).confidenceScore}% Confidence` : 'AI Generated'})
+                      </span>
+                    ) : null}
+                  </div>
                   <div className="flex items-center gap-2.5">
                     <div className="flex items-center gap-1 text-slate-400 text-xs">
                       <Calendar className="size-3.5 text-slate-400/80" />

@@ -2,7 +2,8 @@ const express = require('express');
 const path = require('path');
 const pool = require('../db');
 const authenticateToken = require('../middleware/authMiddleware');
-const { calculateStage2Match } = require('../services/matchingService');
+const { calculateStage2Match, retryFailedEvaluations } = require('../services/matchingService');
+const { normalizeBreakdown } = require('../services/breakdownNormalizer');
 const { sendClientProposal } = require('../services/emailService');
 const router = express.Router();
 
@@ -88,10 +89,35 @@ router.post('/:jobId/:candidateId/evaluate', authenticateToken, async (req, res)
       semanticScore || 50,
       breakdown || { skillFit: 50, experienceFit: 50, budgetFit: 50 }
     );
+
+    // Normalize breakdown in response
+    if (result.breakdown) {
+      result.breakdown = normalizeBreakdown(result.breakdown);
+    }
+
+    if (!result.success) {
+      return res.status(500).json({ error: result.error || 'Evaluation failed', result });
+    }
+
     res.status(200).json(result);
   } catch (error) {
     console.error('Error triggering LLM evaluation:', error);
     res.status(500).json({ error: 'Failed to complete LLM analysis' });
+  }
+});
+
+/**
+ * Endpoint: POST /api/matches/:jobId/retry-failed
+ * Retries LLM evaluation for all failed candidates in a job.
+ */
+router.post('/:jobId/retry-failed', authenticateToken, async (req, res) => {
+  const { jobId } = req.params;
+  try {
+    const result = await retryFailedEvaluations(parseInt(jobId));
+    res.status(200).json(result);
+  } catch (error) {
+    console.error('Error retrying failed evaluations:', error);
+    res.status(500).json({ error: 'Failed to retry evaluations' });
   }
 });
 
@@ -128,11 +154,16 @@ router.post('/:jobId/:candidateId/status', authenticateToken, async (req, res) =
       [status, jobId, candidateId]
     );
 
-    // Sync candidate global status
+    // Sync candidate global status + log HIRED/REJECTED transitions to history
     if (status === 'SENT_TO_CLIENT') {
       await pool.query("UPDATE candidates SET status = 'OUTSOURCED' WHERE id = ?", [candidateId]);
     } else if (status === 'HIRED') {
       await pool.query("UPDATE candidates SET status = 'HIRED', hired_at = NOW() WHERE id = ?", [candidateId]);
+      // Update latest OUTSOURCED history row for this candidate+job to ACCEPTED
+      await pool.query(
+        `UPDATE candidate_client_history SET status = 'ACCEPTED', event_at = NOW() WHERE candidate_id = ? AND job_id = ? AND status = 'OUTSOURCED' ORDER BY id DESC LIMIT 1`,
+        [candidateId, jobId]
+      );
     } else if (status === 'SUGGESTED' || status === 'REJECTED') {
       // Set global status back to ACTIVE if they are not hired/outsourced on other matches
       const [otherMatches] = await pool.query(
@@ -149,6 +180,13 @@ router.post('/:jobId/:candidateId/status', authenticateToken, async (req, res) =
               tenure_months = NULL 
           WHERE id = ?
         `, [candidateId]);
+      }
+      // Log rejection in history if previously outsourced to a client for this job
+      if (status === 'REJECTED') {
+        await pool.query(
+          `UPDATE candidate_client_history SET status = 'REJECTED', event_at = NOW() WHERE candidate_id = ? AND job_id = ? AND status = 'OUTSOURCED' ORDER BY id DESC LIMIT 1`,
+          [candidateId, jobId]
+        );
       }
     }
 
@@ -273,6 +311,12 @@ router.post('/:jobId/outsource', authenticateToken, async (req, res) => {
       // Sync candidate global status
       await pool.query("UPDATE candidates SET status = 'OUTSOURCED' WHERE id = ?", [candidateId]);
 
+      // Log to candidate_client_history
+      await pool.query(
+        `INSERT INTO candidate_client_history (candidate_id, job_id, client_email, status) VALUES (?, ?, ?, 'OUTSOURCED')`,
+        [candidateId, jobId, clientEmail]
+      );
+
       // Update Vendor metrics if candidate was submitted by a vendor
       const [candRows] = await pool.query('SELECT resume_id FROM candidates WHERE id = ?', [candidateId]);
       if (candRows.length > 0) {
@@ -365,6 +409,24 @@ router.post('/:jobId/:candidateId/outsource-email', authenticateToken, async (re
   } catch (error) {
     console.error('Error saving client proposal email:', error);
     res.status(500).json({ error: 'Failed to dispatch email' });
+  }
+});
+
+// GET /api/matches/candidate/:id/history — full outsource/acceptance/rejection timeline
+router.get('/candidate/:id/history', authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT h.id, h.status, h.client_email, h.client_name, h.notes, h.event_at,
+             j.title AS job_title, j.id AS job_id
+      FROM candidate_client_history h
+      JOIN jobs j ON h.job_id = j.id
+      WHERE h.candidate_id = ?
+      ORDER BY h.event_at DESC
+    `, [req.params.id]);
+    res.status(200).json(rows);
+  } catch (error) {
+    console.error('Error fetching candidate history:', error);
+    res.status(500).json({ error: 'Failed to fetch candidate history' });
   }
 });
 

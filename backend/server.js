@@ -11,6 +11,7 @@ const candidatesRoutes = require('./routes/candidates');
 const clientsRoutes = require('./routes/clients');
 const dashboardRoutes = require('./routes/dashboard');
 const profileRoutes = require('./routes/profile');
+const mailIntegrationRoutes = require('./routes/mailIntegration');
 const path = require('path');
 
 const app = express();
@@ -30,6 +31,7 @@ app.use('/api/candidates', candidatesRoutes);
 app.use('/api/clients', clientsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/profile', profileRoutes);
+app.use('/api/mail-integration', mailIntegrationRoutes);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Health check endpoint

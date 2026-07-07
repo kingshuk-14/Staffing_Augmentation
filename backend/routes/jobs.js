@@ -6,12 +6,15 @@ const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const pool = require('../db');
 const authenticateToken = require('../middleware/authMiddleware');
-const Groq = require('groq-sdk');
 const Tesseract = require('tesseract.js');
 const { cleanText } = require('../services/parserHelper');
 const { calculateStage1Matches, calculateStage2Match } = require('../services/matchingService');
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const { normalizeBreakdown, isValidBreakdown } = require('../services/breakdownNormalizer');
+const { logEvaluation, logBatchSummary } = require('../services/evaluationLogger');
+const aiService = require('../services/aiService');
+const knowledgeService = require('../services/knowledgeService');
+const pseudoJdService = require('../services/pseudoJdService');
+const chatService = require('../services/chatService');
 const router = express.Router();
 
 // Multer disk storage setup
@@ -69,42 +72,49 @@ router.post('/', authenticateToken, upload.single('jdFile'), async (req, res) =>
       return res.status(400).json({ error: 'No job description text or file provided' });
     }
 
-    // Call Groq to extract details
-    const systemPrompt = `You are a technical recruiter. Parse the provided job description and extract:
-    1. title: The job title (string). Use '${jdTitle}' as default if not found.
-    2. positions_needed: Number of positions available (integer, default 1).
-    3. budget: Maximum annual salary budget in INR (numeric/null, e.g. 1200000).
-    4. experience_years: Minimum years of experience required (integer/null).
-    5. skills_required: Array of required/essential skills (strings).
-    6. skills_preferred: Array of preferred/nice-to-have skills (strings).
-    Output ONLY valid JSON representing this object.`;
-
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: 'You are an AI parsing API. Return only valid JSON.' },
-        { role: 'user', content: systemPrompt + '\n\nJob Description:\n' + jdText }
-      ],
-      model: 'llama-3.1-8b-instant',
-      temperature: 0.1,
-      response_format: { type: 'json_object' }
-    });
-
-    const parsedData = JSON.parse(chatCompletion.choices[0].message.content);
+    // Call Multi-LLM API to extract details
+    const parsedData = await aiService.parseJobDescriptionMultiLLM(jdText);
+    if (!parsedData) {
+      throw new Error("AI returned null during JD parsing");
+    }
     
-    const title = parsedData.title || jdTitle || 'Unnamed Job Opening';
-    const positions_needed = parsedData.positions_needed || 1;
-    const budget = parsedData.budget || null;
-    const experience_years = parsedData.experience_years || null;
-    const skills_required = parsedData.skills_required || [];
-    const skills_preferred = parsedData.skills_preferred || [];
+    const title = (parsedData.positions && parsedData.positions.length > 0 && parsedData.positions[0] !== 'Not Found') ? parsedData.positions[0] : (jdTitle || 'Unnamed Job Opening');
+    const positions_needed = 1; // Not explicitly requested in the prompt, default to 1
+    const budget = (parsedData.budget && parsedData.budget !== 'Not Found') ? parsedData.budget : null;
+    const experience_years = (parsedData.experience_required && parsedData.experience_required.minimum && parsedData.experience_required.minimum !== 'Not Found') ? parseInt(parsedData.experience_required.minimum) : null;
+    
+    let skills_required = [];
+    if (parsedData.required_skills) {
+      skills_required = [
+        ...(Array.isArray(parsedData.required_skills.critical) ? parsedData.required_skills.critical : []),
+        ...(Array.isArray(parsedData.required_skills.important) ? parsedData.required_skills.important : []),
+        ...(Array.isArray(parsedData.sap_modules) ? parsedData.sap_modules : [])
+      ];
+    } else {
+      const crit = Array.isArray(parsedData.critical_requirements) ? parsedData.critical_requirements.map(c => typeof c === 'object' && c ? (c.value || c.skill || '') : c) : [];
+      const imp = Array.isArray(parsedData.important_requirements) ? parsedData.important_requirements.map(i => typeof i === 'object' && i ? (i.value || i.responsibility || '') : i) : [];
+      const modules = Array.isArray(parsedData.sap_modules) ? parsedData.sap_modules : [];
+      skills_required = [...crit, ...imp, ...modules];
+    }
+    skills_required = skills_required.filter(s => s && s !== 'Not Found');
+    
+    let skills_preferred = [];
+    if (parsedData.required_skills && Array.isArray(parsedData.required_skills.good_to_have)) {
+      skills_preferred = parsedData.required_skills.good_to_have;
+    } else if (Array.isArray(parsedData.preferred_requirements)) {
+      skills_preferred = parsedData.preferred_requirements.map(p => typeof p === 'object' && p ? (p.value || p.tool || '') : p);
+    }
+    skills_preferred = skills_preferred.filter(s => s && s !== 'Not Found');
 
     const client_id = req.body.clientId || null;
 
+    const knowledgeSet = knowledgeService.generateKnowledgeSet(parsedData);
+
     // Save to jobs table
     const [result] = await pool.query(
-      `INSERT INTO jobs (client_id, title, positions_needed, positions_filled, budget, experience_years, status, raw_text) 
-       VALUES (?, ?, ?, 0, ?, ?, 'OPEN', ?)`,
-      [client_id, title, positions_needed, budget, experience_years, jdText]
+      `INSERT INTO jobs (client_id, title, positions_needed, positions_filled, budget, experience_years, status, raw_text, parsed_summary, knowledge_set) 
+       VALUES (?, ?, ?, 0, ?, ?, 'OPEN', ?, ?, ?)`,
+      [client_id, title, positions_needed, budget, experience_years, jdText, JSON.stringify(parsedData), JSON.stringify(knowledgeSet)]
     );
     const jobId = result.insertId;
 
@@ -210,40 +220,51 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
     const dbMatchesMap = new Map(matchRows.map(m => [m.candidate_id, m]));
 
-    // 4. Auto-trigger Stage 2 (LLM) for unscored candidates (cap at 25 for rate limits) in parallel
-    const AUTO_EVAL_CAP = 25;
+    // 4. Auto-trigger Stage 2 (LLM) for unscored candidates (delegated to evaluationQueue)
     const unscoredMatches = stage1Matches.filter(s1m => {
       const dbMatch = dbMatchesMap.get(s1m.candidateId);
       return !dbMatch || dbMatch.llm_score === null;
-    }).slice(0, AUTO_EVAL_CAP);
+    });
 
     if (unscoredMatches.length > 0) {
-      await Promise.all(unscoredMatches.map(async (s1m) => {
-        try {
-          const llmResult = await calculateStage2Match(
-            jobId, s1m.candidateId, s1m.semantic_score, s1m.breakdown
-          );
-          const dbMatch = dbMatchesMap.get(s1m.candidateId);
-          // Update the map with fresh results
-          dbMatchesMap.set(s1m.candidateId, {
-            llm_score: llmResult.llm_score,
-            match_breakdown: JSON.stringify(llmResult.breakdown),
-            rationale: llmResult.rationale,
-            status: dbMatch ? dbMatch.status : 'SUGGESTED',
-            file_name: s1m.fileName,
-            file_path: s1m.filePath,
-            extracted_text: s1m.extractedText
-          });
-        } catch (evalErr) {
-          console.error(`Auto-eval failed for candidate ${s1m.candidateId}:`, evalErr.message);
-        }
-      }));
+      const evaluationQueue = require('../services/evaluationQueue');
+      evaluationQueue.addJob(jobId, unscoredMatches);
     }
-    const autoEvaluated = unscoredMatches.length;
+    const autoEvaluated = unscoredMatches.filter(c => c.semantic_score > 50).length;
 
-    // 5. Build final merged response
-    const matches = stage1Matches.map(s1m => {
+    // 5. Build final merged response — normalize every breakdown + write-back legacy data
+    const matches = await Promise.all(stage1Matches.map(async (s1m) => {
       const dbMatch = dbMatchesMap.get(s1m.candidateId);
+
+      // Get raw breakdown from DB or Stage 1
+      let rawBreakdown = dbMatch ? dbMatch.match_breakdown : s1m.breakdown;
+
+      // Parse JSON string if needed
+      if (typeof rawBreakdown === 'string') {
+        try { rawBreakdown = JSON.parse(rawBreakdown); } catch (e) { rawBreakdown = null; }
+      }
+
+      // Check if legacy/invalid — if so, normalize and write back
+      const wasInvalid = !isValidBreakdown(rawBreakdown);
+      const normalizedBreakdown = normalizeBreakdown(rawBreakdown);
+
+      // Write-back migration: update legacy records transparently
+      if (wasInvalid && dbMatch && dbMatch.id) {
+        try {
+          await pool.query(
+            'UPDATE job_candidate_matches SET match_breakdown = ? WHERE id = ?',
+            [JSON.stringify(normalizedBreakdown), dbMatch.id]
+          );
+          logEvaluation({
+            candidateId: s1m.candidateId, jobId: parseInt(jobId),
+            stage: 'MIGRATION', success: true,
+            detail: 'Legacy breakdown migrated to canonical schema'
+          });
+        } catch (migErr) {
+          console.error(`Migration write-back failed for candidate ${s1m.candidateId}:`, migErr.message);
+        }
+      }
+
       return {
         candidateId: s1m.candidateId,
         candidateName: s1m.candidateName,
@@ -253,14 +274,17 @@ router.get('/:id', authenticateToken, async (req, res) => {
         skills: s1m.skills,
         semanticScore: s1m.semantic_score,
         llmScore: dbMatch ? dbMatch.llm_score : null,
-        matchBreakdown: dbMatch ? dbMatch.match_breakdown : s1m.breakdown,
+        matchBreakdown: normalizedBreakdown,
         rationale: dbMatch ? dbMatch.rationale : 'Score calculated locally.',
         status: dbMatch ? dbMatch.status : 'SUGGESTED',
+        evaluationStatus: dbMatch ? (dbMatch.evaluation_status || 'PENDING') : 'PENDING',
+        retryCount: dbMatch ? (dbMatch.retry_count || 0) : 0,
+        lastError: dbMatch ? (dbMatch.last_error || null) : null,
         fileName: dbMatch ? dbMatch.file_name : s1m.fileName,
         filePath: dbMatch ? dbMatch.file_path : s1m.filePath,
         extractedText: dbMatch ? dbMatch.extracted_text : s1m.extractedText
       };
-    });
+    }));
 
     // Sort by best available score (LLM > Semantic)
     matches.sort((a, b) => {
@@ -274,6 +298,13 @@ router.get('/:id', authenticateToken, async (req, res) => {
     console.error('Error fetching job details:', error);
     res.status(500).json({ error: 'Failed to fetch job details' });
   }
+});
+
+// GET /api/jobs/:id/evaluation-progress
+router.get('/:id/evaluation-progress', authenticateToken, (req, res) => {
+  const evaluationQueue = require('../services/evaluationQueue');
+  const progress = evaluationQueue.getProgress(req.params.id);
+  res.status(200).json(progress);
 });
 
 /**
@@ -318,17 +349,12 @@ router.post('/:id/manual-candidate', authenticateToken, upload.single('resume'),
 
     const cleanedText = cleanText(extractedText).substring(0, 30000);
 
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: 'You are an AI parsing API. Return only valid JSON.' },
-        { role: 'user', content: systemPrompt + '\n\nResume Extract:\n' + cleanedText }
-      ],
-      model: 'llama-3.1-8b-instant',
-      temperature: 0.1,
-      response_format: { type: 'json_object' }
-    });
+    const userPrompt = 'Resume Extract:\n' + cleanedText;
+    const rationalizeTask = 'Review the 4 model extractions, resolve any conflicting parsing (especially related to 2-column resume layouts), and output a single JSON object matching the requested schema exactly.';
 
-    const parsedData = JSON.parse(chatCompletion.choices[0].message.content);
+    const consensusResult = await aiService.executeConsensus(systemPrompt, userPrompt, rationalizeTask);
+    const parsedData = consensusResult.finalJson;
+    if (!parsedData) throw new Error("AI returned null for manual candidate parsing");
 
     // 3. Insert file into resumes table
     const parsedMeta = { fileSize: req.file.size, parsedEngine: mimetype.includes('pdf') ? 'pdf-parse' : 'mammoth' };
@@ -457,9 +483,16 @@ router.get('/:id/vendors', authenticateToken, async (req, res) => {
         WHERE vs.vendor_id = ? AND m.status = 'HIRED'
       `, [vendor.id]);
 
+      // Check if outreach was already sent for THIS specific job
+      const [jobOutreachRows] = await pool.query(
+        'SELECT COUNT(*) as total FROM vendor_outreach WHERE vendor_id = ? AND job_id = ?',
+        [vendor.id, jobId]
+      );
+
       vendor.total_outreach = outreachRows[0].total;
       vendor.total_submissions = subRows[0].total;
       vendor.total_hires = hireRows[0].total;
+      vendor.outreach_sent_for_job = jobOutreachRows[0].total > 0;
 
       // 3. Compute skill matching score against the Job Description
       let skillScore = 100;
@@ -515,11 +548,252 @@ router.get('/:id/vendors', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * Endpoint: POST /api/jobs/chat
+ * Handles conversational queries about the active page context or general QA.
+ */
+router.post('/chat', authenticateToken, async (req, res) => {
+  try {
+    const { message, chatHistory, pageContext } = req.body;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const chatResult = await chatService.getChatResponse(message, chatHistory, pageContext);
+    if (chatResult && typeof chatResult === 'object') {
+      res.status(200).json({
+        response: chatResult.response,
+        inferredJd: chatResult.inferredJd || null
+      });
+    } else {
+      res.status(200).json({ response: chatResult, inferredJd: null });
+    }
+  } catch (error) {
+    console.error('Error in chat route:', error);
+    res.status(500).json({ error: 'Failed to process chat message' });
+  }
+});
+
+/**
+ * Endpoint: POST /api/jobs/generate-pseudo
+ * Generates a Pseudo Job Description from minimal recruiter inputs.
+ */
+router.post('/generate-pseudo', authenticateToken, async (req, res) => {
+  try {
+    const { primarySkill, experience, secondarySkills, location, industry, clientName, employmentType, additionalNotes } = req.body;
+    
+    if (!primarySkill || !experience) {
+      return res.status(400).json({ error: 'Primary Skill and Experience are required' });
+    }
+
+    const pseudoResult = await pseudoJdService.generatePseudoJd({
+      primarySkill,
+      experience,
+      secondarySkills: Array.isArray(secondarySkills) ? secondarySkills : (secondarySkills ? [secondarySkills] : []),
+      location,
+      industry,
+      clientName,
+      employmentType,
+      additionalNotes
+    });
+
+    const client_id = req.body.clientId || null;
+    const knowledgeSet = knowledgeService.generateKnowledgeSet(pseudoResult.parsedSummary);
+
+    // Save to jobs table with is_pseudo = TRUE
+    const [result] = await pool.query(
+      `INSERT INTO jobs (client_id, title, budget, experience_years, status, raw_text, parsed_summary, knowledge_set, is_pseudo, pseudo_jd_metadata) 
+       VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, TRUE, ?)`,
+      [
+        client_id, 
+        pseudoResult.jobTitle, 
+        null, 
+        parseInt(experience.toString().replace(/[^0-9]/g, '')) || null, 
+        pseudoResult.rawJdText, 
+        JSON.stringify(pseudoResult.parsedSummary), 
+        JSON.stringify(knowledgeSet), 
+        JSON.stringify(pseudoResult.metadata)
+      ]
+    );
+    const jobId = result.insertId;
+
+    // Save job skills
+    const skills_required = pseudoResult.parsedSummary.critical_requirements.map(c => c.value);
+    const skills_preferred = pseudoResult.parsedSummary.preferred_requirements.map(p => p.value);
+
+    for (const skill of skills_required) {
+      await pool.query('INSERT IGNORE INTO job_skills (job_id, skill, is_required) VALUES (?, ?, TRUE)', [jobId, skill]);
+    }
+    for (const skill of skills_preferred) {
+      await pool.query('INSERT IGNORE INTO job_skills (job_id, skill, is_required) VALUES (?, ?, FALSE)', [jobId, skill]);
+    }
+
+    // Recompute candidate matching immediately
+    const stage1Matches = await calculateStage1Matches(jobId);
+    
+    // Background run Stage 2 matches (delegated to evaluationQueue)
+    if (stage1Matches.length > 0) {
+      const evaluationQueue = require('../services/evaluationQueue');
+      evaluationQueue.addJob(jobId, stage1Matches);
+    }
+
+    res.status(201).json({
+      message: 'Pseudo Job Description generated successfully',
+      jobId,
+      job: { 
+        id: jobId, 
+        title: pseudoResult.jobTitle, 
+        is_pseudo: true, 
+        pseudo_jd_metadata: pseudoResult.metadata,
+        raw_text: pseudoResult.rawJdText 
+      }
+    });
+  } catch (error) {
+    console.error('Error generating pseudo JD:', error);
+    res.status(500).json({ error: 'Failed to generate pseudo job description' });
+  }
+});
+
+/**
+ * Endpoint: POST /api/jobs/:id/official
+ * Uploads/replaces a Pseudo Job Description with the official JD document or raw text.
+ * Preserves the previous version in the audit history table.
+ */
+router.post('/:id/official', authenticateToken, upload.single('jdFile'), async (req, res) => {
+  const jobId = req.params.id;
+  try {
+    let jdText = req.body.rawText || '';
+    if (req.file) {
+      jdText = await parseFile(req.file.path, req.file.mimetype);
+    }
+    
+    if (!jdText.trim()) {
+      return res.status(400).json({ error: 'No job description text or file provided' });
+    }
+
+    // 1. Fetch current job
+    const [jobs] = await pool.query('SELECT * FROM jobs WHERE id = ?', [jobId]);
+    if (jobs.length === 0) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    const currentJob = jobs[0];
+
+    // 2. Fetch version history count to determine next version number
+    const [historyCount] = await pool.query('SELECT COUNT(*) as count FROM job_version_history WHERE job_id = ?', [jobId]);
+    const nextVersion = historyCount[0].count + 1;
+
+    // 3. Save existing JD to version history
+    await pool.query(
+      `INSERT INTO job_version_history (job_id, version, jd_type, title, raw_text, parsed_summary, knowledge_set, pseudo_jd_metadata) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        jobId, 
+        nextVersion, 
+        currentJob.is_pseudo ? 'PSEUDO' : 'OFFICIAL', 
+        currentJob.title, 
+        currentJob.raw_text, 
+        currentJob.parsed_summary ? (typeof currentJob.parsed_summary === 'string' ? currentJob.parsed_summary : JSON.stringify(currentJob.parsed_summary)) : null,
+        currentJob.knowledge_set ? (typeof currentJob.knowledge_set === 'string' ? currentJob.knowledge_set : JSON.stringify(currentJob.knowledge_set)) : null,
+        currentJob.pseudo_jd_metadata ? (typeof currentJob.pseudo_jd_metadata === 'string' ? currentJob.pseudo_jd_metadata : JSON.stringify(currentJob.pseudo_jd_metadata)) : null
+      ]
+    );
+
+    // 4. Parse new official JD
+    const parsedData = await aiService.parseJobDescriptionMultiLLM(jdText);
+    if (!parsedData) {
+      throw new Error("AI returned null during JD parsing");
+    }
+
+    const title = (parsedData.positions && parsedData.positions.length > 0 && parsedData.positions[0] !== 'Not Found') ? parsedData.positions[0] : (req.body.title || currentJob.title || 'Unnamed Job Opening');
+    const budget = (parsedData.budget && parsedData.budget !== 'Not Found') ? parsedData.budget : null;
+    const experience_years = (parsedData.experience_required && parsedData.experience_required.minimum && parsedData.experience_required.minimum !== 'Not Found') ? parseInt(parsedData.experience_required.minimum) : null;
+    
+    let skills_required = [];
+    if (parsedData.required_skills) {
+      skills_required = [
+        ...(Array.isArray(parsedData.required_skills.critical) ? parsedData.required_skills.critical : []),
+        ...(Array.isArray(parsedData.required_skills.important) ? parsedData.required_skills.important : []),
+        ...(Array.isArray(parsedData.sap_modules) ? parsedData.sap_modules : [])
+      ];
+    } else {
+      const crit = Array.isArray(parsedData.critical_requirements) ? parsedData.critical_requirements.map(c => typeof c === 'object' && c ? (c.value || c.skill || '') : c) : [];
+      const imp = Array.isArray(parsedData.important_requirements) ? parsedData.important_requirements.map(i => typeof i === 'object' && i ? (i.value || i.responsibility || '') : i) : [];
+      const modules = Array.isArray(parsedData.sap_modules) ? parsedData.sap_modules : [];
+      skills_required = [...crit, ...imp, ...modules];
+    }
+    skills_required = skills_required.filter(s => s && s !== 'Not Found');
+    
+    let skills_preferred = [];
+    if (parsedData.required_skills && Array.isArray(parsedData.required_skills.good_to_have)) {
+      skills_preferred = parsedData.required_skills.good_to_have;
+    } else if (Array.isArray(parsedData.preferred_requirements)) {
+      skills_preferred = parsedData.preferred_requirements.map(p => typeof p === 'object' && p ? (p.value || p.tool || '') : p);
+    }
+    skills_preferred = skills_preferred.filter(s => s && s !== 'Not Found');
+
+    const knowledgeSet = knowledgeService.generateKnowledgeSet(parsedData);
+
+    // 5. Update jobs table
+    await pool.query(
+      `UPDATE jobs 
+       SET title = ?, budget = ?, experience_years = ?, raw_text = ?, parsed_summary = ?, knowledge_set = ?, is_pseudo = FALSE, pseudo_jd_metadata = NULL 
+       WHERE id = ?`,
+      [title, budget, experience_years, jdText, JSON.stringify(parsedData), JSON.stringify(knowledgeSet), jobId]
+    );
+
+    // 6. Rebuild job_skills
+    await pool.query('DELETE FROM job_skills WHERE job_id = ?', [jobId]);
+    for (const skill of skills_required) {
+      await pool.query('INSERT IGNORE INTO job_skills (job_id, skill, is_required) VALUES (?, ?, TRUE)', [jobId, skill]);
+    }
+    for (const skill of skills_preferred) {
+      await pool.query('INSERT IGNORE INTO job_skills (job_id, skill, is_required) VALUES (?, ?, FALSE)', [jobId, skill]);
+    }
+
+    // 7. Clear old candidate matches
+    await pool.query('DELETE FROM job_candidate_matches WHERE job_id = ?', [jobId]);
+
+    // 8. Re-evaluate matching candidates
+    const stage1Matches = await calculateStage1Matches(jobId);
+    
+    // Background run Stage 2 matches for candidates (delegated to evaluationQueue)
+    if (stage1Matches.length > 0) {
+      const evaluationQueue = require('../services/evaluationQueue');
+      evaluationQueue.addJob(jobId, stage1Matches);
+    }
+
+    res.status(200).json({
+      message: 'Official Job Description parsed and replaced successfully. Matches updated.',
+      jobId,
+      job: { id: jobId, title, budget, experience_years, skills_required, skills_preferred }
+    });
+  } catch (error) {
+    console.error('Error replacing with official JD:', error);
+    res.status(500).json({ error: 'Failed to upload and parse official Job Description' });
+  }
+});
+
+/**
+ * Endpoint: GET /api/jobs/:id/versions
+ * Fetches the audit version history logs of JDs for a job.
+ */
+router.get('/:id/versions', authenticateToken, async (req, res) => {
+  const jobId = req.params.id;
+  try {
+    const [rows] = await pool.query('SELECT * FROM job_version_history WHERE job_id = ? ORDER BY version DESC', [jobId]);
+    res.status(200).json(rows);
+  } catch (error) {
+    console.error('Error fetching job versions:', error);
+    res.status(500).json({ error: 'Failed to fetch job versions' });
+  }
+});
+
 // DELETE /api/jobs/:id
 router.delete('/:id', authenticateToken, async (req, res) => {
   const jobId = req.params.id;
   try {
-    // Delete record from database (will cascade delete linked job_skills, job_candidate_matches)
+    // Delete record from database (will cascade delete linked job_skills, job_candidate_matches, job_version_history)
     const [result] = await pool.query('DELETE FROM jobs WHERE id = ?', [jobId]);
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: 'Job description not found' });

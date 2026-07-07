@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Users, Search, AlertCircle, Loader2, Mail, Phone, Calendar, Shield, Trash2, Edit3, CheckCircle, XCircle, Send, Check } from "lucide-react";
+import { Users, Search, AlertCircle, Loader2, Mail, Phone, Calendar, Shield, Trash2, Edit3, CheckCircle, XCircle, Send, Check, Clock } from "lucide-react";
 
 interface Candidate {
   id: number;
@@ -33,6 +33,27 @@ export function CandidatesManager() {
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
   const [tenureMonths, setTenureMonths] = useState("12");
   const [isSubmittingHired, setIsSubmittingHired] = useState(false);
+
+  // History Panel State
+  const [historyPanel, setHistoryPanel] = useState<{ cand: Candidate; events: any[] } | null>(null);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  const openHistory = async (cand: Candidate) => {
+    setIsLoadingHistory(true);
+    setHistoryPanel({ cand, events: [] });
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`/api/matches/candidate/${cand.id}/history`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setHistoryPanel({ cand, events: data });
+    } catch {
+      setHistoryPanel({ cand, events: [] });
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
 
   const fetchCandidates = async () => {
     try {
@@ -339,6 +360,14 @@ export function CandidatesManager() {
                       )}
                       
                       <button
+                        onClick={() => openHistory(cand)}
+                        title="View Outsource History"
+                        className="p-1.5 text-slate-400 hover:text-blue-600 rounded border border-slate-100 hover:border-blue-200 bg-slate-50 hover:bg-blue-50 transition"
+                      >
+                        <Clock className="size-3.5" />
+                      </button>
+
+                      <button
                         onClick={() => handleDeleteCandidate(cand.id)}
                         title="Delete Candidate"
                         className="p-1.5 text-slate-400 hover:text-red-600 rounded border border-slate-100 hover:border-red-200 bg-slate-50 hover:bg-red-50 transition ml-1"
@@ -351,6 +380,57 @@ export function CandidatesManager() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Candidate History Drawer */}
+      {historyPanel && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-4 z-50" onClick={() => setHistoryPanel(null)}>
+          <div className="bg-white w-full max-w-lg rounded-xl border border-slate-200 shadow-xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-5 border-b border-slate-100 bg-slate-50">
+              <div>
+                <h3 className="font-bold text-slate-900 flex items-center gap-2"><Clock className="size-4 text-blue-500" /> Outsource History</h3>
+                <p className="text-xs text-slate-400 mt-0.5">{historyPanel.cand.name}</p>
+              </div>
+              <button onClick={() => setHistoryPanel(null)} className="text-slate-400 hover:text-slate-700 text-xl font-bold">✕</button>
+            </div>
+            <div className="p-5 max-h-96 overflow-y-auto">
+              {isLoadingHistory ? (
+                <div className="flex justify-center py-8"><Loader2 className="size-6 animate-spin text-slate-400" /></div>
+              ) : historyPanel.events.length === 0 ? (
+                <p className="text-sm text-slate-400 italic text-center py-8">No outsource history found for this candidate.</p>
+              ) : (
+                <ol className="relative border-l-2 border-slate-200 ml-3 space-y-5">
+                  {historyPanel.events.map((ev) => {
+                    const statusColor =
+                      ev.status === 'ACCEPTED' ? 'bg-green-500' :
+                      ev.status === 'REJECTED' ? 'bg-red-500' :
+                      ev.status === 'WITHDRAWN' ? 'bg-slate-400' :
+                      'bg-blue-500';
+                    const statusLabel =
+                      ev.status === 'ACCEPTED' ? 'Accepted' :
+                      ev.status === 'REJECTED' ? 'Rejected' :
+                      ev.status === 'WITHDRAWN' ? 'Withdrawn' :
+                      'Outsourced to Client';
+                    return (
+                      <li key={ev.id} className="ml-5">
+                        <span className={`absolute -left-[9px] size-4 rounded-full border-2 border-white ${statusColor}`} />
+                        <p className="text-xs font-bold text-slate-700">{statusLabel}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Job: <span className="font-semibold text-slate-700">{ev.job_title}</span>
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Client: <span className="font-semibold text-slate-700">{ev.client_name || ev.client_email}</span>
+                        </p>
+                        {ev.notes && <p className="text-xs text-slate-400 italic mt-0.5">{ev.notes}</p>}
+                        <p className="text-[10px] text-slate-400 mt-1">{new Date(ev.event_at).toLocaleString()}</p>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

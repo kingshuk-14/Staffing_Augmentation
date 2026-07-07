@@ -1,5 +1,7 @@
 const pool = require('../db');
 const Groq = require('groq-sdk');
+const { normalizeBreakdown } = require('./breakdownNormalizer');
+const { logEvaluation, logBatchSummary } = require('./evaluationLogger');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -217,13 +219,56 @@ async function calculateStage1Matches(jobId) {
  * Updates or inserts the match record in the database.
  */
 async function calculateStage2Match(jobId, candidateId, stage1Score, stage1Breakdown) {
+  // Check if comparison already exists in jd_comparisons (caching layer)
+  const [cachedComparisons] = await pool.query(
+    'SELECT * FROM jd_comparisons WHERE jd_id = ? AND candidate_id = ?',
+    [jobId, candidateId]
+  );
+  if (cachedComparisons.length > 0 && cachedComparisons[0].llm_score !== null) {
+    const cached = cachedComparisons[0];
+    let breakdown = cached.match_breakdown;
+    if (typeof breakdown === 'string') {
+      try { breakdown = JSON.parse(breakdown); } catch (e) { breakdown = null; }
+    }
+    
+    // Sync back to job_candidate_matches if missing
+    const [existingMatch] = await pool.query(
+      'SELECT id, retry_count FROM job_candidate_matches WHERE job_id = ? AND candidate_id = ?',
+      [jobId, candidateId]
+    );
+    if (existingMatch.length === 0) {
+      await pool.query(`
+        INSERT INTO job_candidate_matches 
+        (job_id, candidate_id, semantic_score, llm_score, match_breakdown, rationale, evaluation_status, retry_count) 
+        VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED', 1)
+      `, [jobId, candidateId, cached.llm_score, cached.llm_score, JSON.stringify(breakdown), cached.rationale]);
+    } else {
+      await pool.query(`
+        UPDATE job_candidate_matches 
+        SET llm_score = ?, semantic_score = ?, match_breakdown = ?, rationale = ?, evaluation_status = 'COMPLETED'
+        WHERE id = ?
+      `, [cached.llm_score, cached.llm_score, JSON.stringify(breakdown), cached.rationale, existingMatch[0].id]);
+    }
+
+    return {
+      success: true,
+      score: cached.llm_score,
+      llm_score: cached.llm_score,
+      breakdown,
+      rationale: cached.rationale,
+      cacheHit: true
+    };
+  }
+
+  const aiService = require('./aiService');
+  const knowledgeService = require('./knowledgeService');
+
   // Fetch job details
   const [jobRows] = await pool.query('SELECT * FROM jobs WHERE id = ?', [jobId]);
-  const [jobSkillsRows] = await pool.query('SELECT skill, is_required FROM job_skills WHERE job_id = ?', [jobId]);
-
+  
   // Fetch candidate details
   const [candRows] = await pool.query(`
-    SELECT c.*, r.extracted_text 
+    SELECT c.*, r.extracted_text, r.summarised as resume_summarised, r.knowledge_set as resume_knowledge_set
     FROM candidates c
     JOIN resumes r ON c.resume_id = r.id
     WHERE c.id = ?
@@ -236,134 +281,507 @@ async function calculateStage2Match(jobId, candidateId, stage1Score, stage1Break
   const job = jobRows[0];
   const candidate = candRows[0];
 
-  const reqSkills = jobSkillsRows.filter(s => s.is_required).map(s => s.skill);
-  const prefSkills = jobSkillsRows.filter(s => !s.is_required).map(s => s.skill);
+  const jobSummary = typeof job.parsed_summary === 'string' ? JSON.parse(job.parsed_summary) : (job.parsed_summary || { title: job.title, budget: job.budget, experience_years: job.experience_years });
+  const candidateSummary = typeof candidate.resume_summarised === 'string' ? JSON.parse(candidate.resume_summarised) : (candidate.resume_summarised || { name: candidate.name, expected_salary: candidate.expected_salary, experience_years: candidate.total_experience_years });
 
-  // Fetch experiences
-  const [expRows] = await pool.query('SELECT * FROM candidate_experiences WHERE candidate_id = ?', [candidateId]);
-  const experiences = expRows.map(e => `${e.role} at ${e.company} (${e.duration_months || 0} months): ${e.description || ''}`).join('\n');
+  // --- DETERMINISTIC BACKEND CALCULATIONS ---
+  const backendMetrics = {
+    candidateKnowledgeCount: 0,
+    exactMatchCount: 0,
+    normalizedMatchCount: 0,
+    synonymMatchCount: 0,
+    substringMatchCount: 0,
+    semanticMatchCount: 0,
+    practicalMatchCount: 0,
+    remainingUnmatchedCount: 0,
+    
+    criticalMatched: 0,
+    criticalMissing: 0,
+    importantMatched: 0,
+    importantMissing: 0,
+    preferredMatched: 0,
+    preferredMissing: 0,
 
-  // Fetch skills list
-  const [skillsRows] = await pool.query('SELECT skill FROM candidate_skills WHERE candidate_id = ?', [candidateId]);
-  const candidateSkills = skillsRows.map(s => s.skill);
+    matchedResponsibilities: [],
+    missingResponsibilities: [],
+    matchedDomains: [],
+    matchedModules: [],
+    matchedIntegrations: [],
+    matchedTools: [],
+    matchedCertifications: [],
+    
+    exact_matches: [],
+    missingRequiredSkills: [], 
+    missingPreferredSkills: [], 
+    
+    experience_difference_years: 0,
+    experience_score_computed: 0,
+    budget_difference_percent: 0,
+    budget_score_computed: 0,
+    
+    weightBreakdown: {
+      criticalWeight: 0,
+      importantWeight: 0,
+      preferredWeight: 0
+    },
+    
+    appliedCap: "None",
+    capReasoning: ""
+  };
 
-  // Call Groq
-  const prompt = `
-You are a technical recruiter. Score the suitability of the following candidate for the job description.
+  // 1. Fetch or Generate Knowledge Sets
+  let jobKnowledge = typeof job.knowledge_set === 'string' ? JSON.parse(job.knowledge_set) : job.knowledge_set;
+  if (!jobKnowledge) jobKnowledge = knowledgeService.generateKnowledgeSet(jobSummary);
+  
+  let candKnowledge = typeof candidate.resume_knowledge_set === 'string' ? JSON.parse(candidate.resume_knowledge_set) : candidate.resume_knowledge_set;
+  if (!candKnowledge) candKnowledge = knowledgeService.generateKnowledgeSet(candidateSummary);
+  
+  backendMetrics.candidateKnowledgeCount = candKnowledge.length;
 
-Job Description:
-- Title: ${job.title}
-- Required Skills: ${reqSkills.join(', ')}
-- Preferred Skills: ${prefSkills.join(', ')}
-- Required Experience Years: ${job.experience_years || 'N/A'}
-- Budget (Max Salary): ${job.budget ? `₹${job.budget}` : 'N/A'}
+  // 2. Normalization sets for quick lookup
+  const candSet = require('./normalizationService').normalizeArrayToSet(candKnowledge);
+  
+  // Extract Hierarchical Requirements safely
+  const reqCritical = jobSummary.critical_requirements || [];
+  const reqImportant = jobSummary.important_requirements || [];
+  const reqPreferred = jobSummary.preferred_requirements || [];
+  
+  // Backwards compatibility with old parsed JD schema
+  if (jobSummary.required_skills?.critical && reqCritical.length === 0) {
+    jobSummary.required_skills.critical.forEach(s => reqCritical.push({ category: "Technical Skill", priority: "Critical", match_type: "Skill", value: s }));
+  }
+  if (jobSummary.required_skills?.important && reqImportant.length === 0) {
+    jobSummary.required_skills.important.forEach(s => reqImportant.push({ category: "Technical Skill", priority: "Important", match_type: "Skill", value: s }));
+  }
+  if (jobSummary.required_skills?.good_to_have && reqPreferred.length === 0) {
+    jobSummary.required_skills.good_to_have.forEach(s => reqPreferred.push({ category: "Technical Skill", priority: "Preferred", match_type: "Skill", value: s }));
+  }
+  if (jobSummary.responsibilities?.required && reqCritical.length === 0) {
+    jobSummary.responsibilities.required.forEach(s => reqCritical.push({ category: "Responsibility", priority: "Critical", match_type: "Practical", value: s }));
+  }
+  if (jobSummary.responsibilities?.preferred && reqImportant.length === 0) {
+    jobSummary.responsibilities.preferred.forEach(s => reqImportant.push({ category: "Responsibility", priority: "Important", match_type: "Practical", value: s }));
+  }
 
-Candidate Profile:
-- Name: ${candidate.name || 'Unknown'}
-- Skills: ${candidateSkills.join(', ')}
-- Work History:
-${experiences || 'No specific history logged.'}
-- Expected Salary: ${candidate.expected_salary ? `₹${candidate.expected_salary}` : 'N/A'}
+  // Set used to deduplicate matches
+  const matchedCandidateStrings = new Set();
+  
+  // 3. 5-Stage Matching Function for specific items
+  const matchItem = (itemObj) => {
+    const item = typeof itemObj === 'string' ? itemObj : (itemObj.value || "");
+    if (!item) return { matched: false, stage: 0 };
+    
+    const exact = item.trim();
+    
+    // Stage 1: Exact Match
+    if (candKnowledge.includes(exact) && !matchedCandidateStrings.has(exact)) {
+      matchedCandidateStrings.add(exact);
+      return { matched: true, stage: 1, matched_with: exact };
+    }
+    
+    // Stage 2: Normalized Match
+    const norm = require('./normalizationService').normalizeString(item);
+    if (!norm) return { matched: false, stage: 0 };
+    
+    if (candSet.has(norm) && !matchedCandidateStrings.has(norm)) {
+      matchedCandidateStrings.add(norm);
+      return { matched: true, stage: 2, matched_with: norm };
+    }
+    
+    // Stage 3 & 4: Synonym & Substring Match
+    for (const candItem of candSet) {
+      if (!matchedCandidateStrings.has(candItem)) {
+        if (candItem.includes(norm) || norm.includes(candItem)) {
+          matchedCandidateStrings.add(candItem);
+          return { matched: true, stage: 4, matched_with: candItem }; // Substring / Synonym
+        }
+      }
+    }
+    
+    return { matched: false, stage: 0 };
+  };
 
-Resume Extract (Truncated):
-${(candidate.extracted_text || '').substring(0, 3000)}
+  const processRequirementList = (list, priorityLevel) => {
+    let matchedScore = 0;
+    list.forEach(reqObj => {
+      const value = typeof reqObj === 'string' ? reqObj : (reqObj.value || "");
+      const res = matchItem(reqObj);
+      
+      if (res.matched) {
+        backendMetrics.exact_matches.push(value);
+        if (res.stage === 1) backendMetrics.exactMatchCount++;
+        else if (res.stage === 2) backendMetrics.normalizedMatchCount++;
+        else if (res.stage === 4) backendMetrics.substringMatchCount++;
+        
+        if (priorityLevel === 'Critical') {
+            backendMetrics.criticalMatched++;
+            matchedScore += 3; // Highest Weight
+        }
+        else if (priorityLevel === 'Important') {
+            backendMetrics.importantMatched++;
+            matchedScore += 2; // Medium Weight
+        }
+        else {
+            backendMetrics.preferredMatched++;
+            matchedScore += 1; // Lowest Weight
+        }
+      } else {
+        if (priorityLevel === 'Critical') {
+            backendMetrics.criticalMissing++;
+            backendMetrics.missingRequiredSkills.push(value);
+        }
+        else if (priorityLevel === 'Important') {
+            backendMetrics.importantMissing++;
+            backendMetrics.missingRequiredSkills.push(value);
+        }
+        else {
+            backendMetrics.preferredMissing++;
+            backendMetrics.missingPreferredSkills.push(value);
+        }
+      }
+    });
+    return matchedScore;
+  };
 
-Please return a JSON object with:
-1. "skillFit": Score from 0 to 100 based on matching required and preferred skills.
-2. "experienceFit": Score from 0 to 100 based on years of experience, relevant industry, and roles.
-3. "budgetFit": Score from 0 to 100. If Candidate expected salary is less than or equal to Job budget, give 100. If expected salary is greater, reduce score proportionally. If either is N/A, default to 100.
-4. "overallScore": Weighted average score from 0 to 100.
-5. "rationale": A brief 2-3 sentence summary of matching strengths, gaps, and why they fit.
+  backendMetrics.weightBreakdown.criticalWeight = processRequirementList(reqCritical, 'Critical');
+  backendMetrics.weightBreakdown.importantWeight = processRequirementList(reqImportant, 'Important');
+  backendMetrics.weightBreakdown.preferredWeight = processRequirementList(reqPreferred, 'Preferred');
 
-Return ONLY valid JSON.
-`;
+  // Extract specific domains from job vs candidate knowledge (For Frontend compat)
+  const extractMatches = (jobArr) => {
+    const matches = [];
+    (jobArr || []).forEach(item => {
+      if (matchItem(item).matched) matches.push(item);
+    });
+    return matches;
+  };
+  
+  const extractMissing = (jobArr) => {
+    const missing = [];
+    (jobArr || []).forEach(item => {
+      if (!matchItem(item).matched) missing.push(item);
+    });
+    return missing;
+  };
 
+  backendMetrics.matchedModules = extractMatches(jobSummary.sap_modules);
+  backendMetrics.matchedDomains = extractMatches(jobSummary.domains);
+  backendMetrics.matchedIntegrations = extractMatches(jobSummary.integrations);
+  backendMetrics.matchedTools = extractMatches(jobSummary.tools);
+  backendMetrics.matchedCertifications = extractMatches(jobSummary.certifications);
+  
+  backendMetrics.matchedResponsibilities = extractMatches(jobSummary.responsibilities?.required);
+  backendMetrics.missingResponsibilities = extractMissing(jobSummary.responsibilities?.required);
+  
+  // Deduplicate
+  backendMetrics.exact_matches = [...new Set(backendMetrics.exact_matches)];
+  backendMetrics.missingRequiredSkills = [...new Set(backendMetrics.missingRequiredSkills)];
+  backendMetrics.missingPreferredSkills = [...new Set(backendMetrics.missingPreferredSkills)];
+  backendMetrics.matchedResponsibilities = [...new Set(backendMetrics.matchedResponsibilities)];
+  backendMetrics.missingResponsibilities = [...new Set(backendMetrics.missingResponsibilities)];
+
+  backendMetrics.remainingUnmatchedCount = backendMetrics.missingRequiredSkills.length + backendMetrics.missingPreferredSkills.length + backendMetrics.missingResponsibilities.length;
+
+  // Experience Matching (Max 20)
+  const reqExp = parseFloat(jobSummary.experience_required?.minimum || job.experience_years || 0);
+  const candExp = parseFloat(candidateSummary.total_experience || candidate.total_experience_years || 0);
+  backendMetrics.experience_difference_years = candExp - reqExp;
+  
+  // Experience validates skills logic (ensure it doesn't arbitrarily push you if skills missing)
+  if (backendMetrics.experience_difference_years >= 0) {
+    backendMetrics.experience_score_computed = 20;
+  } else if (backendMetrics.experience_difference_years >= -1) {
+    backendMetrics.experience_score_computed = 18;
+  } else if (backendMetrics.experience_difference_years >= -2) {
+    backendMetrics.experience_score_computed = 15;
+  } else if (backendMetrics.experience_difference_years >= -3) {
+    backendMetrics.experience_score_computed = 10;
+  } else {
+    backendMetrics.experience_score_computed = 0;
+  }
+
+  // Budget Matching (Max 20)
+  const extractNumber = (str) => {
+    const num = parseFloat((str || '').toString().replace(/[^0-9.]/g, ''));
+    return isNaN(num) ? 0 : num;
+  };
+  const jdBudget = extractNumber(jobSummary.budget || job.budget);
+  const candBudget = extractNumber(candidateSummary.expected_ctc || candidate.expected_salary);
+  
+  if (jdBudget > 0 && candBudget > 0) {
+    if (candBudget <= jdBudget) {
+      backendMetrics.budget_score_computed = 20;
+      backendMetrics.budget_difference_percent = 0;
+    } else {
+      const overPercentage = ((candBudget - jdBudget) / jdBudget) * 100;
+      backendMetrics.budget_difference_percent = Math.round(overPercentage);
+      if (overPercentage <= 10) backendMetrics.budget_score_computed = 18;
+      else if (overPercentage <= 20) backendMetrics.budget_score_computed = 15;
+      else if (overPercentage <= 30) backendMetrics.budget_score_computed = 10;
+      else backendMetrics.budget_score_computed = 0;
+    }
+  } else {
+    backendMetrics.budget_score_computed = 10;
+  }
+
+  // Exact Skills Score Validation & Caps (Max 60 internally before LLM semantics)
+  const totalReq = reqCritical.length + reqImportant.length + reqPreferred.length;
+  let exactSkillScore = 60;
+  
+  if (totalReq > 0) {
+    const totalMaxWeight = (reqCritical.length * 3) + (reqImportant.length * 2) + (reqPreferred.length * 1);
+    const achievedWeight = backendMetrics.weightBreakdown.criticalWeight + backendMetrics.weightBreakdown.importantWeight + backendMetrics.weightBreakdown.preferredWeight;
+    exactSkillScore = Math.round((achievedWeight / totalMaxWeight) * 60);
+  }
+
+  // Enforce Hard Caps BEFORE LLM Semantic augmentation
+  if (backendMetrics.criticalMissing === 1) {
+    backendMetrics.appliedCap = "Max 85";
+    backendMetrics.capReasoning = "1 Critical requirement missing.";
+  } else if (backendMetrics.criticalMissing === 2) {
+    backendMetrics.appliedCap = "Max 75";
+    backendMetrics.capReasoning = "2 Critical requirements missing.";
+  } else if (backendMetrics.criticalMissing >= 3) {
+    backendMetrics.appliedCap = "Max 60";
+    backendMetrics.capReasoning = "3 or more Critical requirements missing.";
+  }
+
+  // Call the multi-LLM consensus service
+  const evalStartTime = Date.now();
   try {
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: 'You are an AI scoring API. Return only valid JSON.' },
-        { role: 'user', content: prompt }
-      ],
-      model: 'llama-3.1-8b-instant', // fast and efficient model
-      temperature: 0.1,
-      response_format: { type: 'json_object' }
+    const result = await aiService.scoreCandidateMultiLLM(candidateSummary, jobSummary, backendMetrics);
+
+    if (!result || !result.finalJson) {
+      throw new Error("Evaluation returned null");
+    }
+
+    const evaluation = result.finalJson;
+    const llmDurationMs = Date.now() - evalStartTime;
+
+    // --- SCORE VALIDATION & RECALCULATION ---
+    // Read scores directly from the LLM response to avoid hardcoded evaluation rules
+    let experienceScore = typeof evaluation.experience_fit_score === 'number' ? evaluation.experience_fit_score : backendMetrics.experience_score_computed;
+    let budgetScore = typeof evaluation.budget_fit_score === 'number' ? evaluation.budget_fit_score : backendMetrics.budget_score_computed;
+    let skillsScore = typeof evaluation.skill_fit_score === 'number' ? evaluation.skill_fit_score : (exactSkillScore + Math.min(15, (Array.isArray(evaluation.semantic_matches) ? evaluation.semantic_matches.length : 0) * 2) + Math.min(15, (Array.isArray(evaluation.practical_matches) ? evaluation.practical_matches.length : 0) * 2));
+    let finalScore = typeof evaluation.match_score === 'number' ? evaluation.match_score : Math.round((skillsScore * 0.6) + (experienceScore * 0.2) + (budgetScore * 0.2));
+
+    const semanticMatchesCount = Array.isArray(evaluation.semantic_matches) ? evaluation.semantic_matches.length : 0;
+    const practicalMatchesCount = Array.isArray(evaluation.practical_matches) ? evaluation.practical_matches.length : 0;
+    const semanticScore = Math.min(15, semanticMatchesCount * 2);
+    const practicalScore = Math.min(15, practicalMatchesCount * 2);
+
+    // Enforce Hiring Decision thresholds dynamically based on the final score
+    let hiringDecision = "Reject";
+    if (finalScore >= 90) hiringDecision = "Strong Hire";
+    else if (finalScore >= 80) hiringDecision = "Hire";
+    else if (finalScore >= 70) hiringDecision = "Borderline";
+    else if (finalScore >= 60) hiringDecision = "Consider if Talent Pool is Limited";
+
+    // Format rich objects for the frontend
+    const richExperienceScore = {
+      score: experienceScore,
+      required: reqExp,
+      candidate: candExp,
+      difference: backendMetrics.experience_difference_years,
+      percentage: "N/A",
+      reason: evaluation.reasoning?.experience || "Calculated deterministically"
+    };
+
+    const richSkillsScore = {
+      score: skillsScore,
+      exact_match_score: exactSkillScore,
+      semantic_match_score: semanticScore,
+      practical_match_score: practicalScore,
+      required_skills_count: totalReq,
+      exact_matches: backendMetrics.exact_matches,
+      semantic_matches: evaluation.semantic_matches || [],
+      transferable_matches: [],
+      practical_matches: evaluation.practical_matches || [],
+      missing_skills: backendMetrics.missingRequiredSkills,
+      missing_preferred: backendMetrics.missingPreferredSkills,
+      matched_responsibilities: backendMetrics.matchedResponsibilities,
+      reason: evaluation.reasoning?.skills || "Calculated deterministically + LLM augmentation"
+    };
+
+    const richBudgetScore = {
+      score: budgetScore,
+      jd_budget: jdBudget,
+      candidate_budget: candBudget,
+      difference: backendMetrics.budget_difference_percent + "%",
+      reason: evaluation.reasoning?.budget || "Calculated deterministically"
+    };
+
+    const fallbackStrengths = [];
+    if (backendMetrics.exact_matches.length > 0) fallbackStrengths.push(`Strong exact matches including ${backendMetrics.exact_matches.slice(0, 2).join(', ')}.`);
+    if (backendMetrics.experience_difference_years >= 0) fallbackStrengths.push("Exceeds minimum experience requirement.");
+    if (fallbackStrengths.length === 0) fallbackStrengths.push("Candidate meets baseline criteria.");
+
+    const fallbackRisks = [];
+    if (backendMetrics.missingRequiredSkills.length > 0) fallbackRisks.push(`Missing critical skills: ${backendMetrics.missingRequiredSkills.slice(0, 2).join(', ')}.`);
+    if (backendMetrics.experience_difference_years < 0) fallbackRisks.push(`Experience gap of ${Math.abs(backendMetrics.experience_difference_years)} years.`);
+    if (backendMetrics.budget_difference_percent > 0) fallbackRisks.push(`Budget exceeds requirement by ${backendMetrics.budget_difference_percent}%.`);
+    if (backendMetrics.appliedCap !== "None") fallbackRisks.push(backendMetrics.capReasoning);
+    if (fallbackRisks.length === 0) fallbackRisks.push("No major risks identified.");
+
+    const rawBreakdown = {
+      experienceFit: richExperienceScore,
+      skillFit: richSkillsScore,
+      budgetFit: richBudgetScore,
+      hiringDecision: hiringDecision,
+      confidence: evaluation.confidence || 0,
+      bulleted_summary: evaluation.bulleted_summary || [],
+      top_strengths: (evaluation.top_strengths && evaluation.top_strengths.length > 0) ? evaluation.top_strengths : fallbackStrengths,
+      top_risks: (evaluation.top_risks && evaluation.top_risks.length > 0) ? evaluation.top_risks : fallbackRisks,
+      hiring_manager_summary: evaluation.hiring_manager_summary || "",
+      semanticFit: finalScore,
+      rawOutputs: result.rawOutputs,
+      backendMetrics: {
+        exactMatchCount: backendMetrics.exactMatchCount,
+        normalizedMatchCount: backendMetrics.normalizedMatchCount,
+        substringMatchCount: backendMetrics.substringMatchCount,
+        semanticMatchCount: semanticMatchesCount,
+        practicalMatchCount: practicalMatchesCount,
+        criticalMatched: backendMetrics.criticalMatched,
+        criticalMissing: backendMetrics.criticalMissing,
+        appliedCap: backendMetrics.appliedCap
+      }
+    };
+
+    // Normalize breakdown through canonical schema before DB write
+    const breakdown = normalizeBreakdown(rawBreakdown);
+    const rationale = evaluation.reasoning?.overall || "Calculated based on hierarchical knowledge sets and multi-stage semantic extraction.";
+
+    // Insert or Update the match record
+    const [existingMatch] = await pool.query(
+      'SELECT id, retry_count FROM job_candidate_matches WHERE job_id = ? AND candidate_id = ?',
+      [jobId, candidateId]
+    );
+
+    if (existingMatch.length > 0) {
+      await pool.query(`
+        UPDATE job_candidate_matches 
+        SET llm_score = ?, semantic_score = ?, match_breakdown = ?, rationale = ?,
+            evaluation_status = 'COMPLETED', retry_count = ?, last_error = NULL
+        WHERE id = ?
+      `, [finalScore, finalScore, JSON.stringify(breakdown), rationale, (existingMatch[0].retry_count || 0) + 1, existingMatch[0].id]);
+    } else {
+      await pool.query(`
+        INSERT INTO job_candidate_matches 
+        (job_id, candidate_id, semantic_score, llm_score, match_breakdown, rationale, evaluation_status, retry_count) 
+        VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED', 1)
+      `, [jobId, candidateId, finalScore, finalScore, JSON.stringify(breakdown), rationale]);
+    }
+
+    // Insert or Update in the jd_comparisons table
+    await pool.query(`
+      INSERT INTO jd_comparisons (jd_id, candidate_id, llm_score, match_breakdown, rationale)
+      VALUES (?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+      llm_score = VALUES(llm_score),
+      match_breakdown = VALUES(match_breakdown),
+      rationale = VALUES(rationale)
+    `, [jobId, candidateId, finalScore, JSON.stringify(breakdown), rationale]);
+
+    logEvaluation({
+      candidateId, jobId, stage: 'STAGE_2', durationMs: llmDurationMs,
+      success: true, retryCount: (existingMatch.length > 0 ? (existingMatch[0].retry_count || 0) + 1 : 1)
     });
 
-    const responseContent = chatCompletion.choices[0].message.content;
-    const evaluation = JSON.parse(responseContent);
-
-    // Save/Update in database
-    const [existingMatch] = await pool.query(
-      'SELECT id FROM job_candidate_matches WHERE job_id = ? AND candidate_id = ?',
-      [jobId, candidateId]
-    );
-
-    const breakdown = {
-      skillFit: evaluation.skillFit || stage1Breakdown.skillFit,
-      experienceFit: evaluation.experienceFit || stage1Breakdown.experienceFit,
-      budgetFit: evaluation.budgetFit || stage1Breakdown.budgetFit
-    };
-
-    const finalScore = evaluation.overallScore || stage1Score;
-    const rationale = evaluation.rationale || 'Semantic match generated locally.';
-
-    if (existingMatch.length > 0) {
-      await pool.query(
-        `UPDATE job_candidate_matches 
-         SET semantic_score = ?, llm_score = ?, match_breakdown = ?, rationale = ?
-         WHERE id = ?`,
-        [stage1Score, finalScore, JSON.stringify(breakdown), rationale, existingMatch[0].id]
-      );
-    } else {
-      await pool.query(
-        `INSERT INTO job_candidate_matches (job_id, candidate_id, semantic_score, llm_score, match_breakdown, rationale)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [jobId, candidateId, stage1Score, finalScore, JSON.stringify(breakdown), rationale]
-      );
-    }
-
-    return {
-      candidateId,
-      semantic_score: stage1Score,
-      llm_score: finalScore,
-      breakdown,
-      rationale
-    };
+    return { success: true, score: finalScore, llm_score: finalScore, breakdown, rationale, cacheHit: false };
   } catch (error) {
-    console.error(`Error running Stage 2 match for candidate ${candidateId}:`, error.message);
+    const llmDurationMs = Date.now() - evalStartTime;
 
-    // Fallback: save Stage 1 results if Groq fails
-    const [existingMatch] = await pool.query(
-      'SELECT id FROM job_candidate_matches WHERE job_id = ? AND candidate_id = ?',
-      [jobId, candidateId]
-    );
+    logEvaluation({
+      candidateId, jobId, stage: 'STAGE_2', durationMs: llmDurationMs,
+      success: false, failureReason: error.message
+    });
 
-    if (existingMatch.length > 0) {
-      await pool.query(
-        `UPDATE job_candidate_matches 
-         SET semantic_score = ?, llm_score = ?, match_breakdown = ?, rationale = ?
-         WHERE id = ?`,
-        [stage1Score, stage1Score, JSON.stringify(stage1Breakdown), 'Fallback semantic scoring (LLM offline).', existingMatch[0].id]
+    // Store failure metadata in the database instead of silently losing the candidate
+    try {
+      const [existingMatch] = await pool.query(
+        'SELECT id, retry_count FROM job_candidate_matches WHERE job_id = ? AND candidate_id = ?',
+        [jobId, candidateId]
       );
-    } else {
-      await pool.query(
-        `INSERT INTO job_candidate_matches (job_id, candidate_id, semantic_score, llm_score, match_breakdown, rationale)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [jobId, candidateId, stage1Score, stage1Score, JSON.stringify(stage1Breakdown), 'Fallback semantic scoring (LLM offline).']
-      );
+
+      if (existingMatch.length > 0) {
+        await pool.query(`
+          UPDATE job_candidate_matches 
+          SET evaluation_status = 'FAILED', retry_count = ?, last_error = ?
+          WHERE id = ?
+        `, [(existingMatch[0].retry_count || 0) + 1, error.message, existingMatch[0].id]);
+      } else {
+        await pool.query(`
+          INSERT INTO job_candidate_matches 
+          (job_id, candidate_id, evaluation_status, retry_count, last_error) 
+          VALUES (?, ?, 'FAILED', 1, ?)
+        `, [jobId, candidateId, error.message]);
+      }
+    } catch (dbErr) {
+      console.error(`Failed to store failure metadata for candidate ${candidateId}:`, dbErr.message);
     }
 
-    return {
-      candidateId,
-      semantic_score: stage1Score,
-      llm_score: stage1Score,
-      breakdown: stage1Breakdown,
-      rationale: 'Fallback semantic scoring (LLM offline).'
-    };
+    // Return structured failure instead of throwing — candidate must not disappear
+    return { success: false, score: null, llm_score: null, breakdown: null, rationale: null, error: error.message };
   }
+}
+
+/**
+ * Retry failed evaluations for a specific job.
+ * Only re-evaluates candidates with evaluation_status = 'FAILED'.
+ */
+async function retryFailedEvaluations(jobId) {
+  const [failedRows] = await pool.query(
+    'SELECT candidate_id, retry_count FROM job_candidate_matches WHERE job_id = ? AND evaluation_status = ?',
+    [jobId, 'FAILED']
+  );
+
+  if (failedRows.length === 0) {
+    return { retried: 0, succeeded: 0, failed: 0, details: [] };
+  }
+
+  const batchStart = Date.now();
+  const details = [];
+
+  const results = await Promise.allSettled(
+    failedRows.map(async (row) => {
+      const result = await calculateStage2Match(jobId, row.candidate_id, 0, null);
+      return { candidateId: row.candidate_id, result };
+    })
+  );
+
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const settledResult of results) {
+    if (settledResult.status === 'fulfilled') {
+      const { candidateId, result } = settledResult.value;
+      if (result.success) {
+        succeeded++;
+        details.push({ candidateId, status: 'COMPLETED' });
+      } else {
+        failed++;
+        details.push({ candidateId, status: 'FAILED', error: result.error });
+      }
+    } else {
+      failed++;
+      details.push({ candidateId: null, status: 'FAILED', error: settledResult.reason?.message || 'Unknown error' });
+    }
+  }
+
+  logBatchSummary({
+    jobId,
+    totalCandidates: failedRows.length,
+    evaluated: failedRows.length,
+    succeeded,
+    failed,
+    totalDurationMs: Date.now() - batchStart
+  });
+
+  return { retried: failedRows.length, succeeded, failed, details };
 }
 
 module.exports = {
   calculateStage1Matches,
-  calculateStage2Match
+  calculateStage2Match,
+  retryFailedEvaluations
 };

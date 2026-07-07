@@ -248,6 +248,14 @@ router.post('/outreach', authenticateToken, async (req, res) => {
         // Send Email (SMTP / File log)
         const emailLog = await sendJobOutreach(vendor, job, requiredSkills, preferredSkills);
 
+        // Persist the SMTP Message-ID so we can thread vendor replies against it
+        if (emailLog && emailLog.messageId) {
+          await pool.query(
+            'UPDATE vendor_outreach SET message_id = ? WHERE job_id = ? AND vendor_id = ? ORDER BY id DESC LIMIT 1',
+            [emailLog.messageId, jobId, vendorId]
+          );
+        }
+
         // Update vendor rating
         await updateVendorMetrics(vendorId);
 
@@ -429,6 +437,25 @@ router.post('/submit-resume', upload.single('resume'), async (req, res) => {
 
     // 8. Recompute vendor performance metrics
     await updateVendorMetrics(vendorId);
+
+    // 9. Send email notification as a reply to the original outreach thread
+    try {
+      const { sendVendorSubmissionNotification } = require('../services/emailService');
+      // Look up the Message-ID of the original outreach email for this vendor+job
+      const [outreachMsgRows] = await pool.query(
+        'SELECT message_id FROM vendor_outreach WHERE job_id = ? AND vendor_id = ? ORDER BY id DESC LIMIT 1',
+        [jobId, vendorId]
+      );
+      const originalMessageId = outreachMsgRows.length > 0 ? outreachMsgRows[0].message_id : null;
+      await sendVendorSubmissionNotification(vendor, job, {
+        name,
+        email,
+        phone,
+        expectedSalary
+      }, `uploads/${filename}`, originalname, originalMessageId);
+    } catch (mailErr) {
+      console.error('Error sending vendor submission notification email:', mailErr);
+    }
 
     res.status(201).json({
       message: 'Candidate resume submitted successfully',

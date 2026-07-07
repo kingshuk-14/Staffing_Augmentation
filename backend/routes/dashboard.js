@@ -104,4 +104,35 @@ router.get('/stats', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * Endpoint: GET /api/dashboard/report
+ * Generates report data for all jobs.
+ */
+router.get('/report', authenticateToken, async (req, res) => {
+  try {
+    const [reportRows] = await pool.query(`
+      SELECT 
+        j.id,
+        j.title as position,
+        c.company_name as client,
+        j.positions_needed as openings,
+        j.experience_years as experience,
+        j.raw_text as jd,
+        COALESCE(SUM(CASE WHEN m.status = 'SENT_TO_CLIENT' THEN 1 ELSE 0 END), 0) as outsourced,
+        COALESCE(SUM(CASE WHEN m.status = 'HIRED' THEN 1 ELSE 0 END), 0) as hired,
+        COALESCE(SUM(CASE WHEN m.status = 'REJECTED' THEN 1 ELSE 0 END), 0) as rejected
+      FROM jobs j
+      LEFT JOIN clients c ON j.client_id = c.id
+      LEFT JOIN job_candidate_matches m ON j.id = m.job_id
+      GROUP BY j.id
+      ORDER BY j.created_at DESC
+    `);
+    
+    res.status(200).json(reportRows);
+  } catch (error) {
+    console.error('Error generating report data:', error);
+    res.status(500).json({ error: 'Failed to generate report data' });
+  }
+});
+
 module.exports = router;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FileText, Calendar, User, Database, AlertCircle, Eye, X, Sparkles, Loader2, Trash2, CopyX, ShieldCheck, Filter, FlagOff } from "lucide-react";
+import { FileText, Calendar, User, Database, AlertCircle, Eye, X, Sparkles, Loader2, Trash2, CopyX, ShieldCheck, Filter, FlagOff, RefreshCw } from "lucide-react";
 
 function renderNestedObject(obj: any): React.ReactNode {
   if (typeof obj !== 'object' || obj === null) return String(obj);
@@ -145,7 +145,27 @@ export function ParsedResumesList() {
     fetchResumes();
   }, []);
 
-
+  const handleReparse = async (resumeId: number) => {
+    try {
+      const token = localStorage.getItem("token");
+      const response = await fetch(`/api/resumes/${resumeId}/reparse`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (!response.ok) throw new Error("Failed to trigger reparse");
+      // Set status to INGESTED in local state immediately
+      setResumes(prev =>
+        prev.map(r => r.id === resumeId ? { ...r, processing_status: 'INGESTED', error_message: null } : r)
+      );
+      // Wait a moment then fetch fresh data
+      setTimeout(fetchResumes, 1000);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to trigger resume reparsing.");
+    }
+  };
 
   const handleDelete = async (resumeId: number) => {
     if (!window.confirm("Are you sure you want to delete this resume? This will also remove the candidate profile and all associated matching records.")) return;
@@ -324,6 +344,7 @@ export function ParsedResumesList() {
                 <tr className="bg-slate-50/80 border-b border-slate-200/80">
                   <th className="px-6 py-4 text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Candidate / File</th>
                   <th className="px-6 py-4 text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Duplicate Status</th>
+                  <th className="px-6 py-4 text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-4 text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Uploaded By</th>
                   <th className="px-6 py-4 text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Engine</th>
                   <th className="px-6 py-4 text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">Size</th>
@@ -389,6 +410,23 @@ export function ParsedResumesList() {
                         )}
                       </td>
 
+                      {/* Processing status cell */}
+                      <td className="px-6 py-4">
+                        {resume.processing_status === 'COMPLETED' ? (
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-extrabold border uppercase tracking-wide bg-green-50 text-green-700 border-green-200/60">
+                            Success
+                          </span>
+                        ) : resume.processing_status === 'FAILED' ? (
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-extrabold border uppercase tracking-wide bg-red-50 text-red-700 border-red-200/60 cursor-help" title={resume.error_message || 'Unknown parsing error'}>
+                            Failed
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-extrabold border uppercase tracking-wide bg-blue-50 text-blue-700 border-blue-200/60 animate-pulse">
+                            Parsing...
+                          </span>
+                        )}
+                      </td>
+
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-2.5">
                           <div className="size-8 rounded-full bg-gradient-to-br from-slate-600 to-slate-800 text-white flex items-center justify-center font-bold text-xs shrink-0">
@@ -427,6 +465,16 @@ export function ParsedResumesList() {
                             <Trash2 className="size-3.5" />
                             Delete
                           </button>
+                          {resume.processing_status === 'FAILED' && (
+                            <button
+                              onClick={() => handleReparse(resume.id)}
+                              title="Retry parsing this resume"
+                              className="flex items-center gap-1.5 text-xs font-bold text-blue-700 hover:text-blue-900 transition-all duration-200 bg-blue-50 hover:bg-blue-100 border border-blue-200/60 px-2.5 py-1.5 rounded-lg animate-bounce"
+                            >
+                              <RefreshCw className="size-3.5 animate-spin" style={{ animationDuration: '3s' }} />
+                              Reparse
+                            </button>
+                          )}
                           {isDup && (
                             <button
                               onClick={() => handleClearDuplicate(resume.id)}

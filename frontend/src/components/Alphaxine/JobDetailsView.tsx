@@ -2,8 +2,27 @@ import React, { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { 
   ArrowLeft, Briefcase, Users, IndianRupee, Calendar, AlertCircle, FileText, CheckCircle, 
-  XCircle, Send, Plus, Sparkles, Loader2, Award, ClipboardCheck, Trash2, Mail, ExternalLink, X
+  XCircle, Send, Plus, Sparkles, Loader2, Award, ClipboardCheck, Trash2, Mail, ExternalLink, X, Upload
 } from "lucide-react";
+
+const getFitScore = (fitVal: any) => {
+  if (fitVal === null || fitVal === undefined) return 0;
+  if (typeof fitVal === 'number') return fitVal;
+  if (typeof fitVal === 'object' && typeof fitVal.score === 'number') return fitVal.score;
+  return 0;
+};
+
+const getParsedBreakdown = (raw: any) => {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+  return raw;
+};
 
 export function JobDetailsView() {
   const { id } = useParams<{ id: string }>();
@@ -13,7 +32,78 @@ export function JobDetailsView() {
   const [error, setError] = useState("");
   
   // Tab control
-  const [activeTab, setActiveTab] = useState<"matches" | "outreach" | "upload">("matches");
+  const [activeTab, setActiveTab] = useState<"matches" | "outreach" | "upload" | "versions">("matches");
+  
+  // Versions and Official JD Upload states
+  const [versions, setVersions] = useState<any[]>([]);
+  const [showUploadOfficialModal, setShowUploadOfficialModal] = useState(false);
+  const [officialFile, setOfficialFile] = useState<File | null>(null);
+  const [officialRawText, setOfficialRawText] = useState("");
+  const [isUploadingOfficial, setIsUploadingOfficial] = useState(false);
+  const [officialUploadError, setOfficialUploadError] = useState("");
+  
+  const fetchVersions = async () => {
+    try {
+      const token = localStorage.getItem("token");
+      const response = await fetch(`/api/jobs/${id}/versions`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const verData = await response.json();
+        setVersions(verData);
+      }
+    } catch (err) {
+      console.error("Error fetching versions:", err);
+    }
+  };
+
+  const handleUploadOfficialJd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsUploadingOfficial(true);
+    setOfficialUploadError("");
+
+    try {
+      const token = localStorage.getItem("token");
+      const formData = new FormData();
+      if (officialFile) {
+        formData.append("jdFile", officialFile);
+      } else {
+        formData.append("rawText", officialRawText);
+      }
+
+      const response = await fetch(`/api/jobs/${id}/official`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Failed to upload official JD");
+      }
+
+      setShowUploadOfficialModal(false);
+      setOfficialFile(null);
+      setOfficialRawText("");
+      await fetchJobDetails();
+      await fetchVersions();
+    } catch (err: any) {
+      console.error(err);
+      setOfficialUploadError(err.message || "Failed to replace Pseudo JD with official JD");
+    } finally {
+      setIsUploadingOfficial(false);
+    }
+  };
+
+  const getPseudoMetadata = (job: any) => {
+    if (!job.pseudo_jd_metadata) return null;
+    if (typeof job.pseudo_jd_metadata === 'string') {
+      try { return JSON.parse(job.pseudo_jd_metadata); } catch(e) { return null; }
+    }
+    return job.pseudo_jd_metadata;
+  };
   
   // State for Evaluation & Statuses
   const [evaluatingId, setEvaluatingId] = useState<number | null>(null);
@@ -45,6 +135,8 @@ export function JobDetailsView() {
   const [isEmailBodyEdited, setIsEmailBodyEdited] = useState(false);
   const [attachResume, setAttachResume] = useState(true);
   const [isSendingOutsource, setIsSendingOutsource] = useState(false);
+  const [clients, setClients] = useState<any[]>([]);
+  const [selectedClientId, setSelectedClientId] = useState<string>("");
 
   // Background Upload States
   const [uploadStage, setUploadStage] = useState<"IDLE" | "UPLOADING" | "PARSING" | "SUCCESS" | "ERROR">("IDLE");
@@ -52,6 +144,10 @@ export function JobDetailsView() {
 
   // State for Batch Candidate Selection
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
+  
+  // State for expanding/collapsing lists
+  const [showAllRequirements, setShowAllRequirements] = useState(false);
+  const [expandedCandidateSkills, setExpandedCandidateSkills] = useState<{ [key: number]: boolean }>({});
 
   const generateEmailBody = (selectedCands: any[], attach: boolean) => {
     if (!selectedCands || selectedCands.length === 0) return "";
@@ -120,6 +216,7 @@ export function JobDetailsView() {
 
     setOutsourceModalCand(batchCand);
     setClientEmail("client@company.com");
+    setSelectedClientId("");
     setIsEmailBodyEdited(false); // Reset edited flag
     
     if (selectedCands.length === 1) {
@@ -202,33 +299,59 @@ export function JobDetailsView() {
     }
   };
 
-  useEffect(() => {
-    fetchJobDetails();
-    fetchVendors();
-  }, [id]);
-
-  const handleRunEvaluation = async (candidateId: number, semanticScore: number, breakdown: any) => {
-    setEvaluatingId(candidateId);
+  const fetchClients = async () => {
     try {
       const token = localStorage.getItem("token");
-      const response = await fetch(`/api/matches/${id}/${candidateId}/evaluate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ semanticScore, breakdown })
+      const response = await fetch("/api/clients", {
+        headers: { Authorization: `Bearer ${token}` }
       });
-      if (!response.ok) throw new Error("Failed to score candidate");
-      await fetchJobDetails();
+      if (response.ok) {
+        const clientList = await response.json();
+        setClients(clientList);
+      }
     } catch (err) {
       console.error(err);
-      alert("Failed to complete AI scoring evaluation.");
-    } finally {
-      setEvaluatingId(null);
     }
   };
 
+  const [evalProgress, setEvalProgress] = useState<{ total: number, completed: number, currentCandidateName: string | null } | null>(null);
+
+  const fetchEvalProgress = async () => {
+    try {
+      const token = localStorage.getItem("token");
+      const response = await fetch(`/api/jobs/${id}/evaluation-progress`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const progressData = await response.json();
+        setEvalProgress(progressData);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  useEffect(() => {
+    fetchJobDetails();
+    fetchVendors();
+    fetchVersions();
+    fetchClients();
+  }, [id]);
+
+  useEffect(() => {
+    if (!data || !data.matches) return;
+    const hasPending = data.matches.some((cand: any) => cand.evaluationStatus === "PENDING");
+    if (hasPending) {
+      fetchEvalProgress();
+      const interval = setInterval(() => {
+        fetchJobDetails();
+        fetchEvalProgress();
+      }, 3000);
+      return () => clearInterval(interval);
+    } else {
+      setEvalProgress(null);
+    }
+  }, [data]);
   const handleUpdateStatus = async (candidateId: number, newStatus: string) => {
     setUpdatingId(candidateId);
     try {
@@ -280,6 +403,8 @@ export function JobDetailsView() {
 
       setOutreachResult(`Successfully triggered outreach!\n\n${fileLogged}`);
       setSelectedVendors([]);
+      // Refresh vendor list so outreach_sent_for_job flags update
+      fetchVendors();
     } catch (err) {
       console.error(err);
       alert("Failed to send outreach to selected vendors.");
@@ -369,14 +494,93 @@ export function JobDetailsView() {
   }
 
   const { job, matches } = data;
+  const isPseudoJd = job.is_pseudo;
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       {/* Back Button */}
-      <Link to="/alphaxine/jobs" className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-500 hover:text-slate-800 transition">
-        <ArrowLeft className="size-4" />
-        Back to Jobs Directory
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link to="/alphaxine/jobs" className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-500 hover:text-slate-800 transition">
+          <ArrowLeft className="size-4" />
+          Back to Jobs Directory
+        </Link>
+        {isPseudoJd && (
+          <button
+            onClick={() => setShowUploadOfficialModal(true)}
+            className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-[#8b5cf6] to-[#6d28d9] text-white text-xs font-bold rounded-xl shadow-md hover:shadow-purple-600/10 active:scale-95 transition"
+          >
+            <Sparkles className="size-3.5 animate-pulse" />
+            Upload Official JD
+          </button>
+        )}
+      </div>
+
+      {/* Pseudo JD Banner & Predictions */}
+      {isPseudoJd && (
+        <div className="bg-gradient-to-r from-purple-500 to-indigo-600 p-6 rounded-2xl text-white shadow-lg space-y-4 relative overflow-hidden animate-fade-in">
+          <div className="absolute top-0 right-0 p-8 opacity-10 shrink-0">
+            <Sparkles className="size-24" />
+          </div>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Sparkles className="size-5 animate-pulse" />
+                <h3 className="text-lg font-bold">This is an AI-Generated Pseudo Job Description</h3>
+              </div>
+              <p className="text-purple-100 text-xs mt-1 max-w-2xl">
+                The recruiter provided minimal info. The engine standardization and historic trend inferences are being used to score candidates until the official client JD is uploaded.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowUploadOfficialModal(true)}
+              className="px-5 py-2.5 bg-white text-purple-700 font-bold text-xs rounded-xl shadow-md hover:bg-purple-50 active:scale-95 transition shrink-0"
+            >
+              Upload Official JD
+            </button>
+          </div>
+
+          {/* Predicted Attributes */}
+          {getPseudoMetadata(job) && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3 pt-4 border-t border-white/20 text-purple-100 text-xs">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">Project Type</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).inferredAttributes?.projectType?.value || "N/A"}</strong>
+                <span className="text-[9px] opacity-75">Conf: {getPseudoMetadata(job).inferredAttributes?.projectType?.confidence || 0}%</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">Industry</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).inferredAttributes?.industry?.value || "N/A"}</strong>
+                <span className="text-[9px] opacity-75">Conf: {getPseudoMetadata(job).inferredAttributes?.industry?.confidence || 0}%</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">SAP Version</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).inferredAttributes?.sapVersion?.value || "N/A"}</strong>
+                <span className="text-[9px] opacity-75">Conf: {getPseudoMetadata(job).inferredAttributes?.sapVersion?.confidence || 0}%</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">Client Facing</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).inferredAttributes?.clientFacingRequirement?.value || "N/A"}</strong>
+                <span className="text-[9px] opacity-75">Conf: {getPseudoMetadata(job).inferredAttributes?.clientFacingRequirement?.confidence || 0}%</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">Team Size</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).inferredAttributes?.teamSize?.value || "N/A"}</strong>
+                <span className="text-[9px] opacity-75">Conf: {getPseudoMetadata(job).inferredAttributes?.teamSize?.confidence || 0}%</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">Work Mode</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).inferredAttributes?.workMode?.value || "N/A"}</strong>
+                <span className="text-[9px] opacity-75">Conf: {getPseudoMetadata(job).inferredAttributes?.workMode?.confidence || 0}%</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-extrabold uppercase text-purple-200 block">Confidence</span>
+                <strong className="text-white block mt-0.5">{getPseudoMetadata(job).confidenceScore || 0}%</strong>
+                <span className="text-[9px] opacity-75">Overall Score</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* JD Main Details Card */}
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between gap-6">
@@ -389,6 +593,12 @@ export function JobDetailsView() {
             }`}>
               {job.status}
             </span>
+            {isPseudoJd && (
+              <span className="text-[10px] font-extrabold tracking-wider uppercase px-2.5 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 flex items-center gap-1">
+                <Sparkles className="size-3 text-purple-600 animate-pulse" />
+                Pseudo JD Reference
+              </span>
+            )}
             <div>
               <h1 className="text-2xl font-bold text-slate-900">{job.title}</h1>
               {job.client_name && (
@@ -402,7 +612,13 @@ export function JobDetailsView() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2">
             <div className="flex items-center gap-2 text-sm text-slate-500">
               <IndianRupee className="size-4 text-slate-400" />
-              <span>Budget: <strong>{job.budget ? `₹${parseInt(job.budget).toLocaleString("en-IN")}` : "N/A"}</strong></span>
+              <span>Budget: <strong>{(() => {
+                if (!job.budget) return "N/A";
+                const clean = job.budget.toString().replace(/[^0-9]/g, '');
+                if (clean === "" || parseInt(clean) <= 1) return "N/A";
+                const num = parseInt(clean);
+                return !isNaN(num) ? `₹${num.toLocaleString("en-IN")}` : job.budget;
+              })()}</strong></span>
             </div>
             <div className="flex items-center gap-2 text-sm text-slate-500">
               <Users className="size-4 text-slate-400" />
@@ -422,21 +638,69 @@ export function JobDetailsView() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
             <div className="space-y-2">
               <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Required Skills Matrix</h4>
-              <div className="flex flex-wrap gap-1.5">
-                {job.skills_required && job.skills_required.length > 0 ? (
-                  job.skills_required.map((skill: string, index: number) => (
-                    <span key={index} className="px-2.5 py-1 bg-slate-100 text-slate-700 text-xs font-semibold rounded-md border border-slate-200">
-                      {skill}
-                    </span>
-                  ))
-                ) : (
+              <div className="space-y-3">
+                {/* Short Core Skills */}
+                {(() => {
+                  const shortSkills = (job.skills_required || []).filter((s: string) => s.length <= 25);
+                  if (shortSkills.length === 0) return null;
+                  return (
+                    <div className="flex flex-wrap gap-1.5">
+                      {shortSkills.map((skill: string, index: number) => (
+                        <span key={index} className="px-2.5 py-1 bg-slate-100 text-slate-700 text-[11px] font-semibold rounded-md border border-slate-200">
+                          {skill}
+                        </span>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* Long Key Requirements / Responsibilities */}
+                {(() => {
+                  const longSkills = (job.skills_required || []).filter((s: string) => s.length > 25);
+                  if (longSkills.length === 0) return null;
+                  
+                  const displayedSkills = showAllRequirements ? longSkills : longSkills.slice(0, 5);
+                  const hasMore = longSkills.length > 5;
+
+                  return (
+                    <div className="space-y-1.5 bg-slate-50/50 p-3 rounded-lg border border-slate-100">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Functional & Technical Requirements</span>
+                      <ul className="list-disc pl-4 space-y-1">
+                        {displayedSkills.map((skill: string, index: number) => (
+                          <li key={index} className="text-xs text-slate-600 leading-normal">
+                            {skill}
+                          </li>
+                        ))}
+                      </ul>
+                      {hasMore && (
+                        <button
+                          onClick={() => setShowAllRequirements(!showAllRequirements)}
+                          className="mt-1.5 text-[10px] font-bold text-[#F55036] hover:text-[#c9381f] focus:outline-none transition-all block"
+                        >
+                          {showAllRequirements ? "View Less" : `View More (+${longSkills.length - 5} requirements)`}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Preferred Skills */}
+                {job.skills_preferred && job.skills_preferred.length > 0 && (
+                  <div className="pt-1.5">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">Preferred Skills</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {job.skills_preferred.map((skill: string, index: number) => (
+                        <span key={index} className="px-2.5 py-1 bg-blue-50/60 text-blue-700 text-[11px] font-semibold rounded-md border border-blue-100">
+                          {skill}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(!job.skills_required || job.skills_required.length === 0) && (!job.skills_preferred || job.skills_preferred.length === 0) && (
                   <span className="text-xs text-slate-400 italic">None specified</span>
                 )}
-                {job.skills_preferred && job.skills_preferred.map((skill: string, index: number) => (
-                  <span key={index} className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-semibold rounded-md border border-blue-100">
-                    {skill} (Preferred)
-                  </span>
-                ))}
               </div>
             </div>
 
@@ -498,11 +762,58 @@ export function JobDetailsView() {
         >
           Resume Ingestion
         </button>
+        {versions.length > 0 && (
+          <button
+            onClick={() => setActiveTab("versions")}
+            className={`relative px-5 py-3 text-sm font-bold transition-all duration-200 ${
+              activeTab === "versions"
+                ? "text-[#F55036] after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-gradient-to-r after:from-[#F55036] after:to-[#c9381f] after:rounded-t"
+                : "text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            Audit Version History
+            <span className={`ml-2 text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+              activeTab === "versions" ? "bg-[#F55036]/10 text-[#F55036]" : "bg-slate-100 text-slate-500"
+            }`}>{versions.length}</span>
+          </button>
+        )}
       </div>
 
       {/* Tab Contents */}
       <div className={activeTab === "matches" ? "" : "hidden"}>
         <div className="space-y-4">
+          {evalProgress && evalProgress.total > 0 && (
+            <div className="bg-gradient-to-r from-slate-900 to-slate-800 text-white p-5 rounded-2xl border border-slate-700 shadow-xl space-y-3 relative overflow-hidden transition-all duration-300">
+              <div className="flex justify-between items-center relative z-10">
+                <div>
+                  <h4 className="text-sm font-bold flex items-center gap-2">
+                    <Sparkles className="size-4 text-amber-400 animate-spin" />
+                    Analyzing Candidate Profiles...
+                  </h4>
+                  {evalProgress.currentCandidateName ? (
+                    <p className="text-xs text-slate-400 mt-1">
+                      Currently evaluating: <span className="text-slate-100 font-semibold">{evalProgress.currentCandidateName}</span>
+                    </p>
+                  ) : (
+                    <p className="text-xs text-slate-400 mt-1">Spacing API calls to avoid rate limits...</p>
+                  )}
+                </div>
+                <div className="text-right">
+                  <span className="text-xs font-bold bg-slate-700/50 px-2.5 py-1 rounded-full border border-slate-600/50">
+                    {evalProgress.completed} / {evalProgress.total} Complete
+                  </span>
+                </div>
+              </div>
+              <div className="w-full bg-slate-700/40 h-2.5 rounded-full overflow-hidden relative border border-slate-600/30">
+                <div 
+                  className="bg-gradient-to-r from-[#F55036] via-[#c9381f] to-amber-500 h-full rounded-full transition-all duration-500 ease-out shadow-lg"
+                  style={{ width: `${(evalProgress.completed / evalProgress.total) * 100}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 italic">Sequential processing enabled (approx. 1 minute per profile to satisfy standard model limits).</p>
+            </div>
+          )}
+
           {matches.length === 0 ? (
             <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-slate-500">
               <ClipboardCheck className="size-10 text-slate-300 mx-auto mb-2" />
@@ -637,53 +948,78 @@ export function JobDetailsView() {
 
                       {/* Candidate Skills Column Segment */}
                       {cand.skills && cand.skills.length > 0 && (
-                        <div className="flex flex-wrap gap-1 pt-1">
+                        <div className="flex flex-wrap gap-1 pt-1 items-center">
                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mr-1 align-middle mt-0.5">Skills:</span>
-                          {cand.skills.slice(0, 5).map((skill: string, index: number) => {
-                            const isReq = data.job.skills_required?.some((s: string) => s.toLowerCase() === skill.toLowerCase());
-                            const isPref = data.job.skills_preferred?.some((s: string) => s.toLowerCase() === skill.toLowerCase());
+                          {(() => {
+                            const isExpanded = !!expandedCandidateSkills[cand.candidateId];
+                            const displayedSkills = isExpanded ? cand.skills : cand.skills.slice(0, 5);
                             return (
-                              <span 
-                                key={index} 
-                                className={`px-2 py-0.5 rounded text-[9px] font-semibold border ${
-                                  isReq ? "bg-green-50 text-green-700 border-green-200" :
-                                  isPref ? "bg-blue-50 text-blue-700 border-blue-200" :
-                                  "bg-slate-50 text-slate-600 border-slate-200"
-                                }`}
-                              >
-                                {skill}
-                              </span>
+                              <>
+                                {displayedSkills.map((skill: string, index: number) => {
+                                  const isReq = data.job.skills_required?.some((s: string) => s.toLowerCase() === skill.toLowerCase());
+                                  const isPref = data.job.skills_preferred?.some((s: string) => s.toLowerCase() === skill.toLowerCase());
+                                  return (
+                                    <span 
+                                      key={index} 
+                                      className={`px-2 py-0.5 rounded text-[9px] font-semibold border ${
+                                        isReq ? "bg-green-50 text-green-700 border-green-200" :
+                                        isPref ? "bg-blue-50 text-blue-700 border-blue-200" :
+                                        "bg-slate-50 text-slate-600 border-slate-200"
+                                      }`}
+                                    >
+                                      {skill}
+                                    </span>
+                                  );
+                                })}
+                                {cand.skills.length > 5 && (
+                                  <button
+                                    onClick={() => setExpandedCandidateSkills(prev => ({
+                                      ...prev,
+                                      [cand.candidateId]: !prev[cand.candidateId]
+                                    }))}
+                                    className="text-[9px] text-[#F55036] hover:text-[#c9381f] font-bold self-center ml-1 focus:outline-none"
+                                  >
+                                    {isExpanded ? "Show Less" : `+${cand.skills.length - 5} more`}
+                                  </button>
+                                )}
+                              </>
                             );
-                          })}
-                          {cand.skills.length > 5 && (
-                            <span className="text-[10px] text-slate-400 font-semibold self-center ml-1">+{cand.skills.length - 5} more</span>
-                          )}
+                          })()}
                         </div>
                       )}
 
                       {/* Score Breakdown (if evaluated) */}
-                      {cand.matchBreakdown && (
-                        <div className="grid grid-cols-3 gap-2 pt-2 text-[10px] uppercase font-bold text-slate-500">
-                          <div className="flex flex-col">
-                            <span>Skill Fit: {cand.matchBreakdown.skillFit}%</span>
-                            <div className="h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
-                              <div className="h-full bg-primary" style={{ width: `${cand.matchBreakdown.skillFit}%` }}></div>
+                      {(() => {
+                        const parsed = getParsedBreakdown(cand.matchBreakdown);
+                        if (!parsed) return null;
+                        
+                        const skillScore = getFitScore(parsed.skillFit);
+                        const expScore = getFitScore(parsed.experienceFit);
+                        const budgetScore = getFitScore(parsed.budgetFit);
+
+                        return (
+                          <div className="grid grid-cols-3 gap-2 pt-2 text-[10px] uppercase font-bold text-slate-500">
+                            <div className="flex flex-col">
+                              <span>Skill Fit: {skillScore}%</span>
+                              <div className="h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+                                <div className="h-full bg-primary" style={{ width: `${skillScore}%` }}></div>
+                              </div>
+                            </div>
+                            <div className="flex flex-col">
+                              <span>Experience Fit: {expScore}%</span>
+                              <div className="h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+                                <div className="h-full bg-primary" style={{ width: `${expScore}%` }}></div>
+                              </div>
+                            </div>
+                            <div className="flex flex-col">
+                              <span>Budget Fit: {budgetScore}%</span>
+                              <div className="h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+                                <div className="h-full bg-primary" style={{ width: `${budgetScore}%` }}></div>
+                              </div>
                             </div>
                           </div>
-                          <div className="flex flex-col">
-                            <span>Experience Fit: {cand.matchBreakdown.experienceFit}%</span>
-                            <div className="h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
-                              <div className="h-full bg-primary" style={{ width: `${cand.matchBreakdown.experienceFit}%` }}></div>
-                            </div>
-                          </div>
-                          <div className="flex flex-col">
-                            <span>Budget Fit: {cand.matchBreakdown.budgetFit}%</span>
-                            <div className="h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
-                              <div className="h-full bg-primary" style={{ width: `${cand.matchBreakdown.budgetFit}%` }}></div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                        );
+                      })()}
                     </div>
                   </div>
 
@@ -705,20 +1041,7 @@ export function JobDetailsView() {
 
                       {/* Action buttons */}
                       <div className="w-full space-y-2">
-                        {!isLlmScored && (
-                          <button
-                            onClick={() => handleRunEvaluation(cand.candidateId, cand.semanticScore, cand.matchBreakdown)}
-                            disabled={evaluatingId === cand.candidateId}
-                            className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-[#F55036]/5 hover:bg-[#F55036]/10 text-[#F55036] border border-[#F55036]/20 rounded-xl text-xs font-bold transition-all duration-200"
-                          >
-                            {evaluatingId === cand.candidateId ? (
-                              <Loader2 className="size-3.5 animate-spin" />
-                            ) : (
-                              <Sparkles className="size-3.5" />
-                            )}
-                            Deep AI Evaluation
-                          </button>
-                        )}
+
 
                         <div className="w-full">
                           {cand.status !== "SENT_TO_CLIENT" ? (
@@ -768,51 +1091,64 @@ export function JobDetailsView() {
             <div className="space-y-4">
               <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Select Outreach Partners (Ranked by Score)</h4>
               <div className="border border-slate-200 rounded-lg overflow-hidden divide-y divide-slate-100">
-                {vendors.map((vendor, index: number) => (
-                  <div key={vendor.id} className="p-3 flex items-center justify-between hover:bg-slate-50 transition text-sm">
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="checkbox"
-                        checked={selectedVendors.includes(vendor.id)}
-                        onChange={() => handleVendorSelect(vendor.id)}
-                        className="size-4 text-primary border-slate-300 rounded focus:ring-primary"
-                      />
-                      <div>
-                        <div className="font-semibold text-slate-800 flex items-center gap-2">
-                          <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded font-bold">
-                            Rank #{index + 1}
-                          </span>
-                          {vendor.name}
+                {vendors.map((vendor, index: number) => {
+                  const alreadySent = vendor.outreach_sent_for_job;
+                  return (
+                    <div
+                      key={vendor.id}
+                      className={`p-3 flex items-center justify-between transition text-sm ${
+                        alreadySent ? "bg-amber-50/40 hover:bg-amber-50/60" : "hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedVendors.includes(vendor.id)}
+                          onChange={() => handleVendorSelect(vendor.id)}
+                          className="size-4 text-primary border-slate-300 rounded focus:ring-primary"
+                        />
+                        <div>
+                          <div className="font-semibold text-slate-800 flex items-center gap-2">
+                            <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded font-bold">
+                              Rank #{index + 1}
+                            </span>
+                            {vendor.name}
+                            {alreadySent && (
+                              <span className="text-[9px] bg-amber-100 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded font-bold flex items-center gap-1">
+                                ✉ Already Contacted
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-400">{vendor.email}</div>
                         </div>
-                        <div className="text-xs text-slate-400">{vendor.email}</div>
                       </div>
-                    </div>
 
-                    <div className="flex items-center gap-4 text-xs">
-                      <div>
-                        Specialties:{" "}
-                        <strong className="text-slate-600">
-                          {vendor.specializations ? vendor.specializations.join(", ") : "General"}
-                        </strong>
-                      </div>
-                      <div className="flex flex-col items-end gap-1 select-none">
-                        <div className="flex items-center gap-1">
-                          Skill Match:{" "}
-                          <span className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
-                            vendor.skill_score >= 80 ? "bg-green-50 text-green-700" :
-                            vendor.skill_score >= 50 ? "bg-amber-50 text-amber-700" :
-                            "bg-slate-50 text-slate-500"
-                          }`}>
-                            {vendor.skill_score}%
-                          </span>
+                      <div className="flex items-center gap-4 text-xs">
+                        <div>
+                          Specialties:{" "}
+                          <strong className="text-slate-600">
+                            {vendor.specializations ? vendor.specializations.join(", ") : "General"}
+                          </strong>
                         </div>
-                        <div className="text-[10px] text-slate-400">
-                          Performance Rank: {vendor.historical_score}%
+                        <div className="flex flex-col items-end gap-1 select-none">
+                          <div className="flex items-center gap-1">
+                            Skill Match:{" "}
+                            <span className={`font-bold px-1.5 py-0.5 rounded text-[10px] ${
+                              vendor.skill_score >= 80 ? "bg-green-50 text-green-700" :
+                              vendor.skill_score >= 50 ? "bg-amber-50 text-amber-700" :
+                              "bg-slate-50 text-slate-500"
+                            }`}>
+                              {vendor.skill_score}%
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            Performance Rank: {vendor.historical_score}%
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Email Template Preview */}
@@ -827,23 +1163,45 @@ export function JobDetailsView() {
               </div>
 
               <div className="flex justify-end pt-2">
-                <button
-                  onClick={handleSendOutreach}
-                  disabled={selectedVendors.length === 0 || isSendingOutreach}
-                  className="flex items-center gap-2 px-5 py-2 bg-primary text-white rounded-lg hover:bg-primary/95 transition text-sm font-semibold disabled:opacity-50"
-                >
-                  {isSendingOutreach ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" />
-                      Dispatched requests...
-                    </>
-                  ) : (
-                    <>
-                      <Send className="size-4" />
-                      Send Outreach Request ({selectedVendors.length})
-                    </>
-                  )}
-                </button>
+                {/* Show "Send Again" if ALL selected vendors have already been contacted, else "Send Outreach Mail" */}
+                {(() => {
+                  const allAlreadySent = selectedVendors.length > 0 &&
+                    selectedVendors.every(vid => vendors.find(v => v.id === vid)?.outreach_sent_for_job);
+                  const someAlreadySent = selectedVendors.some(vid => vendors.find(v => v.id === vid)?.outreach_sent_for_job);
+                  return (
+                    <button
+                      onClick={handleSendOutreach}
+                      disabled={selectedVendors.length === 0 || isSendingOutreach}
+                      className={`flex items-center gap-2 px-5 py-2 rounded-lg transition text-sm font-semibold disabled:opacity-50 ${
+                        allAlreadySent
+                          ? "bg-amber-500 hover:bg-amber-600 text-white"
+                          : "bg-primary hover:bg-primary/95 text-white"
+                      }`}
+                    >
+                      {isSendingOutreach ? (
+                        <>
+                          <Loader2 className="size-4 animate-spin" />
+                          Dispatching...
+                        </>
+                      ) : allAlreadySent ? (
+                        <>
+                          <Send className="size-4" />
+                          Send Again ({selectedVendors.length})
+                        </>
+                      ) : someAlreadySent ? (
+                        <>
+                          <Send className="size-4" />
+                          Send Outreach Mail ({selectedVendors.length} — {selectedVendors.filter(vid => vendors.find(v => v.id === vid)?.outreach_sent_for_job).length} resend)
+                        </>
+                      ) : (
+                        <>
+                          <Send className="size-4" />
+                          Send Outreach Mail ({selectedVendors.length})
+                        </>
+                      )}
+                    </button>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -1038,6 +1396,31 @@ export function JobDetailsView() {
             <form onSubmit={handleSendOutsourceProposal} className="space-y-4">
               <div className="space-y-3 text-sm">
                 <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-500 uppercase">Select Client</label>
+                  <select
+                    value={selectedClientId}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setSelectedClientId(val);
+                      if (val) {
+                        const client = clients.find(c => c.id.toString() === val);
+                        if (client && client.email) {
+                          setClientEmail(client.email);
+                        }
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent text-sm bg-white cursor-pointer"
+                  >
+                    <option value="">-- Select Client (Custom Email) --</option>
+                    {clients.map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.company_name} {c.email ? `(${c.email})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-500 uppercase">Client Contact Email</label>
                   <input
                     type="text"
@@ -1103,6 +1486,157 @@ export function JobDetailsView() {
                 >
                   {isSendingOutsource ? <Loader2 className="size-4 animate-spin" /> : null}
                   Send Outsource Proposal
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Tab Contents: Version History Audit Logs */}
+      {activeTab === "versions" && (
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6 animate-fade-in">
+          <div>
+            <h3 className="text-lg font-bold text-slate-800">Job Description Version Audit Logs</h3>
+            <p className="text-xs text-slate-400 mt-1">Audit log of all JDs (Pseudo or Official) previously saved for this role.</p>
+          </div>
+          <div className="space-y-4">
+            {versions.map((ver: any) => {
+              const meta = ver.pseudo_jd_metadata ? (typeof ver.pseudo_jd_metadata === 'string' ? JSON.parse(ver.pseudo_jd_metadata) : ver.pseudo_jd_metadata) : null;
+              return (
+                <div key={ver.id} className="border border-slate-100 rounded-xl p-4 bg-slate-50/50 hover:bg-slate-50 transition relative overflow-hidden">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3 mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md">V{ver.version}</span>
+                      <span className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${
+                        ver.jd_type === 'PSEUDO' ? 'bg-purple-50 text-purple-700 border border-purple-100' : 'bg-blue-50 text-blue-700 border border-blue-100'
+                      }`}>{ver.jd_type} JD</span>
+                      <h4 className="text-sm font-bold text-slate-700">{ver.title}</h4>
+                    </div>
+                    <span className="text-xs text-slate-400 font-medium">Archived: {new Date(ver.created_at).toLocaleString()}</span>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="text-xs text-slate-600 space-y-2">
+                      <div>
+                        <strong>Raw Text Content:</strong>
+                        <div className="max-h-24 overflow-y-auto bg-white p-2 rounded border border-slate-100 mt-1 whitespace-pre-wrap font-mono text-[10px] leading-relaxed">
+                          {ver.raw_text}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {meta && (
+                      <div className="text-xs text-slate-500 space-y-1">
+                        <strong className="text-slate-600 block mb-1">AI Inference Metadata:</strong>
+                        <div>Primary Skill: <strong className="text-slate-700">{meta.inputs?.primarySkill}</strong></div>
+                        <div>Standardized Role: <strong className="text-slate-700">{meta.standardRole}</strong></div>
+                        <div>Target Experience: <strong className="text-slate-700">{meta.inputs?.experience}</strong></div>
+                        <div>Confidence Score: <strong className="text-slate-700">{meta.confidenceScore}%</strong></div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Upload Official JD Modal */}
+      {showUploadOfficialModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col relative animate-scale-in">
+            <div className="bg-gradient-to-r from-purple-650 to-indigo-650 p-4 text-white flex items-center justify-between shadow-md">
+              <div className="flex items-center gap-2">
+                <Sparkles className="size-5 animate-pulse" />
+                <h3 className="font-bold text-base">Upload Official Client JD</h3>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowUploadOfficialModal(false);
+                  setOfficialFile(null);
+                  setOfficialRawText("");
+                  setOfficialUploadError("");
+                }}
+                className="p-1 rounded-lg text-purple-100 hover:text-white hover:bg-white/10 transition"
+              >
+                <X className="size-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUploadOfficialJd} className="p-6 space-y-6">
+              {officialUploadError && (
+                <div className="bg-red-50 text-red-700 p-3.5 rounded-xl border border-red-150 flex items-center gap-2 text-xs font-semibold">
+                  <AlertCircle className="size-4 shrink-0 text-red-500" />
+                  <p>{officialUploadError}</p>
+                </div>
+              )}
+
+              <div className="space-y-4">
+                <p className="text-xs text-slate-500">
+                  Provide the official Job Description. The system will parse it, archive the current Pseudo JD, update all candidate matching scores, and transition the job status.
+                </p>
+
+                <div className="border border-dashed border-slate-300 hover:border-purple-500/50 rounded-2xl p-6 flex flex-col items-center justify-center bg-slate-50 hover:bg-purple-50/5 cursor-pointer transition-all duration-200 relative group">
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.txt"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files.length > 0) {
+                        setOfficialFile(e.target.files[0]);
+                      }
+                    }}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                  <div className="size-11 bg-white border border-slate-200 rounded-xl flex items-center justify-center text-slate-400 group-hover:text-purple-600 group-hover:border-purple-600/30 transition-all duration-250 shadow-sm mb-3">
+                    <Upload className="size-5" />
+                  </div>
+                  <span className="text-xs font-semibold text-slate-700 text-center px-2">
+                    {officialFile ? officialFile.name : "Upload PDF or DOCX file"}
+                  </span>
+                  <span className="text-[10px] text-slate-400 mt-1">Maximum file size 10MB</span>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider block">Or Paste Raw JD Text</label>
+                  <textarea
+                    placeholder="Paste official JD raw text here..."
+                    rows={6}
+                    value={officialRawText}
+                    onChange={(e) => setOfficialRawText(e.target.value)}
+                    disabled={!!officialFile}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition disabled:bg-slate-50"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowUploadOfficialModal(false);
+                    setOfficialFile(null);
+                    setOfficialRawText("");
+                    setOfficialUploadError("");
+                  }}
+                  className="px-4 py-2 border border-slate-200 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUploadingOfficial}
+                  className="px-5 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 hover:shadow-lg hover:shadow-purple-600/20 active:scale-95 transition disabled:opacity-50"
+                >
+                  {isUploadingOfficial ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" />
+                      Parsing & Matching...
+                    </>
+                  ) : (
+                    "Upload & Recompute Scores"
+                  )}
                 </button>
               </div>
             </form>

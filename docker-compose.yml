@@ -22,7 +22,7 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - backend_uploads:/usr/src/app/uploads
+      - ./backend/uploads:/usr/src/app/uploads
       - backend_sent_emails:/usr/src/app/sent_emails
 
   frontend:

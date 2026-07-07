@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS resumes (
   extracted_text LONGTEXT,
   parsed_metadata JSON,
   summarised JSON,
+  knowledge_set JSON NULL,
   is_duplicate BOOLEAN NOT NULL DEFAULT FALSE,
   duplicate_of INT NULL,
   duplicate_score FLOAT NULL,
@@ -61,13 +62,32 @@ CREATE TABLE IF NOT EXISTS jobs (
   title VARCHAR(255) NOT NULL,
   positions_needed INT NOT NULL DEFAULT 1,
   positions_filled INT NOT NULL DEFAULT 0,
-  budget DECIMAL(12, 2) NULL,
+  budget VARCHAR(255) NULL,
   experience_years INT NULL,
   status VARCHAR(20) DEFAULT 'OPEN',
   raw_text LONGTEXT NULL,
+  parsed_summary JSON NULL,
+  knowledge_set JSON NULL,
+  is_pseudo BOOLEAN DEFAULT FALSE,
+  pseudo_jd_metadata JSON DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL
+);
+
+-- 4b. Table structure for table `job_version_history`
+CREATE TABLE IF NOT EXISTS job_version_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  job_id INT NOT NULL,
+  version INT NOT NULL,
+  jd_type ENUM('PSEUDO', 'OFFICIAL') NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  raw_text LONGTEXT NULL,
+  parsed_summary JSON NULL,
+  knowledge_set JSON NULL,
+  pseudo_jd_metadata JSON DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
 );
 
 -- 5. Table structure for table `job_skills`
@@ -169,6 +189,9 @@ CREATE TABLE IF NOT EXISTS job_candidate_matches (
   match_breakdown JSON NULL,
   rationale TEXT NULL,
   status VARCHAR(50) DEFAULT 'SUGGESTED',
+  evaluation_status VARCHAR(20) DEFAULT 'PENDING',
+  retry_count INT DEFAULT 0,
+  last_error TEXT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
   FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
@@ -197,3 +220,57 @@ CREATE TABLE IF NOT EXISTS password_reset_otps (
   expires_at TIMESTAMP NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 17. Table structure for table `vendor_outreach`
+CREATE TABLE IF NOT EXISTS vendor_outreach (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  job_id INT NOT NULL,
+  vendor_id INT NOT NULL,
+  message_id VARCHAR(512) DEFAULT NULL COMMENT 'SMTP Message-ID of the outreach email sent to vendor, used for reply threading',
+  sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (vendor_id) REFERENCES vendors(id) ON DELETE CASCADE
+);
+
+-- 18. Table structure for table `vendor_submissions`
+CREATE TABLE IF NOT EXISTS vendor_submissions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  vendor_id INT NOT NULL,
+  resume_id INT NOT NULL,
+  job_id INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (vendor_id) REFERENCES vendors(id) ON DELETE CASCADE,
+  FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+-- 19. Table structure for table `candidate_client_history`
+-- Tracks every outsource / acceptance / rejection event for a candidate against a client
+CREATE TABLE IF NOT EXISTS candidate_client_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  candidate_id INT NOT NULL,
+  job_id INT NOT NULL,
+  client_email VARCHAR(255) NOT NULL,
+  client_name VARCHAR(255) DEFAULT NULL,
+  status ENUM('OUTSOURCED','ACCEPTED','REJECTED','WITHDRAWN') NOT NULL DEFAULT 'OUTSOURCED',
+  notes TEXT DEFAULT NULL,
+  event_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+-- 20. Table structure for table `jd_comparisons`
+-- Caches Stage 2 LLM evaluations for candidates against job descriptions
+CREATE TABLE IF NOT EXISTS jd_comparisons (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  jd_id INT NOT NULL,
+  candidate_id INT NOT NULL,
+  llm_score FLOAT NULL,
+  match_breakdown JSON NULL,
+  rationale TEXT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (jd_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+  UNIQUE KEY unique_jd_candidate (jd_id, candidate_id)
+);
+
